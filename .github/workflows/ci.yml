@@ -1,0 +1,73 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e . pytest-cov
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Format check
+        run: black --check .
+
+      - name: Type check
+        run: mypy --strict src/
+
+      - name: Test suite with coverage
+        run: pytest --cov=src --cov-report=term-missing --cov-report=xml
+
+      - name: Enforce coverage gates
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from coverage import Coverage
+
+          gates = {
+              Path("src/rules"): 0.85,
+              Path("src/monitor"): 0.85,
+          }
+
+          coverage = Coverage(data_file=".coverage")
+          coverage.load()
+
+          failures = []
+          for root, threshold in gates.items():
+              statements = 0
+              covered = 0
+              for path in root.rglob("*.py"):
+                  filename = str(path.resolve())
+                  _, executable, _, missing, _ = coverage.analysis2(filename)
+                  statements += len(executable)
+                  covered += len(set(executable) - set(missing))
+
+              ratio = 1.0 if statements == 0 else covered / statements
+              print(f"{root}: {ratio:.2%}")
+              if ratio < threshold:
+                  failures.append(
+                      f"{root} coverage {ratio:.2%} is below required {threshold:.0%}"
+                  )
+
+          if failures:
+              raise SystemExit("\n".join(failures))
+          PY

@@ -1,0 +1,29 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: always
+    command:
+      - redis-server
+      - --appendonly
+      - ${REDIS_APPENDONLY:-yes}
+      - --dir
+      - /data
+    volumes:
+      - ${REDIS_DATA_DIR:-./data/redis}:/data
+
+  bot:
+    build:
+      context: .
+    restart: always
+    depends_on:
+      - redis
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./data/heartbeat:/heartbeat
+    command:
+      - python
+      - -m
+      - src.app
