@@ -11,3 +11,4 @@ build/
 dist/
 htmlcov/
 data/redis/
+.DS_Store
