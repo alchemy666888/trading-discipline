@@ -18,7 +18,7 @@ from src.models.alert import Alert
 from src.models.breach import Breach, BreachUserResponse
 from src.models.conversation import ConversationState
 from src.models.signal import Severity, Signal
-from src.models.trade import Direction, Regime, Trade, TradeDraft, TradeStatus
+from src.models.trade import Direction, Trade, TradeDraft, TradeStatus
 from src.rules import validation as validate
 
 T = TypeVar("T")
@@ -26,28 +26,49 @@ T = TypeVar("T")
 _SCRIPT_DIR = Path(__file__).resolve().parent / "scripts"
 
 # Fields that cannot be edited after trade creation
-NON_EDITABLE_FIELDS: frozenset[str] = frozenset({
-    "id",
-    "opened_at",
-    "closed_at",
-    "close_price",
-    "realized_pnl",
-    "status",
-    "size_reduction_enforced",
-})
+NON_EDITABLE_FIELDS: frozenset[str] = frozenset(
+    {
+        "id",
+        "opened_at",
+        "closed_at",
+        "close_price",
+        "realized_pnl",
+        "status",
+        "size_reduction_enforced",
+    }
+)
 
 # Fields that can be edited on open trades
-EDITABLE_FIELDS: frozenset[str] = frozenset({
-    "direction",
-    "size_usdt",
-    "leverage",
-    "leverage_override_reason",
-    "entry_price",
-    "invalidation_price",
-    "max_loss_usdt",
-    "regime",
-    "thesis",
-})
+EDITABLE_FIELDS: frozenset[str] = frozenset(
+    {
+        "direction",
+        "size_usdt",
+        "leverage",
+        "leverage_override_reason",
+        "entry_price",
+        "invalidation_price",
+        "max_loss_usdt",
+        "regime",
+        "thesis",
+    }
+)
+
+CLOSED_EDITABLE_FIELDS: frozenset[str] = frozenset(
+    {
+        "direction",
+        "size_usdt",
+        "leverage",
+        "leverage_override_reason",
+        "entry_price",
+        "invalidation_price",
+        "max_loss_usdt",
+        "regime",
+        "thesis",
+        "opened_at",
+        "closed_at",
+        "close_price",
+    }
+)
 
 
 def filter_editable_fields(updates: dict[str, Any]) -> dict[str, Any]:
@@ -67,9 +88,7 @@ def filter_editable_fields(updates: dict[str, Any]) -> dict[str, Any]:
         {"size_usdt": 1000}
     """
     return {
-        key: value
-        for key, value in updates.items()
-        if key not in NON_EDITABLE_FIELDS
+        key: value for key, value in updates.items() if key not in NON_EDITABLE_FIELDS
     }
 
 
@@ -653,6 +672,95 @@ class RedisRepository:
                 except WatchError:
                     continue
 
+    async def update_closed_trade(
+        self,
+        trade_id: int,
+        *,
+        updates: dict[str, Any],
+        recomputed_pnl: float | None,
+    ) -> Trade | None:
+        """Atomically update editable fields on a trade that is still closed."""
+
+        trade_key_name = keyspace.trade_key(trade_id)
+        async with self._client.pipeline() as pipe:
+            while True:
+                try:
+                    await pipe.watch(trade_key_name)
+                    trade_data = await self._resolve_redis_call(
+                        pipe.hgetall(trade_key_name)
+                    )
+                    if not trade_data:
+                        await pipe.unwatch()  # type: ignore[no-untyped-call]
+                        return None
+
+                    existing_trade = self._deserialize_trade(trade_data)
+                    if existing_trade.status != TradeStatus.CLOSED:
+                        await pipe.unwatch()  # type: ignore[no-untyped-call]
+                        return None
+
+                    editable_updates = {
+                        field: value
+                        for field, value in updates.items()
+                        if field in CLOSED_EDITABLE_FIELDS
+                    }
+                    payload = existing_trade.model_dump()
+                    payload.update(editable_updates)
+                    if (
+                        "leverage" in editable_updates
+                        and self._require_int(payload["leverage"]) < 20
+                    ):
+                        payload["leverage_override_reason"] = None
+                    if recomputed_pnl is not None:
+                        payload["realized_pnl"] = recomputed_pnl
+
+                    updated_trade = Trade.model_validate(payload)
+                    if updated_trade.leverage >= 20:
+                        reason = updated_trade.leverage_override_reason
+                        if reason is None:
+                            msg = (
+                                "leverage_override_reason is required when "
+                                "leverage >= 20. Must be 10-500 characters."
+                            )
+                            raise ValueError(msg)
+                    if (
+                        updated_trade.closed_at is not None
+                        and updated_trade.closed_at < updated_trade.opened_at
+                    ):
+                        msg = "closed_at must be greater than or equal to opened_at."
+                        raise ValueError(msg)
+
+                    mapping = self._serialize_trade(updated_trade)
+                    pipe.multi()  # type: ignore[no-untyped-call]
+                    pipe.hset(trade_key_name, mapping=mapping)
+                    if updated_trade.leverage_override_reason is None:
+                        pipe.hdel(trade_key_name, "leverage_override_reason")
+                    if updated_trade.opened_at != existing_trade.opened_at:
+                        pipe.zadd(
+                            keyspace.trades_all_key(),
+                            {
+                                str(updated_trade.id): self._datetime_to_epoch(
+                                    updated_trade.opened_at
+                                )
+                            },
+                        )
+                    if updated_trade.closed_at != existing_trade.closed_at:
+                        pipe.zadd(
+                            keyspace.trades_closed_key(),
+                            {
+                                str(updated_trade.id): self._datetime_to_epoch(
+                                    self._ensure_aware_datetime(updated_trade.closed_at)
+                                )
+                            },
+                        )
+                    await pipe.execute()
+                    stored_trade = await self.get_trade(trade_id)
+                    if stored_trade is None:
+                        msg = f"Trade {trade_id} disappeared after update."
+                        raise RepositoryError(msg)
+                    return stored_trade
+                except WatchError:
+                    continue
+
     async def update_trade(
         self,
         trade_id: int,
@@ -720,7 +828,9 @@ class RedisRepository:
                         "direction": existing_trade.direction,
                         "size_usdt": existing_trade.size_usdt,
                         "leverage": existing_trade.leverage,
-                        "leverage_override_reason": existing_trade.leverage_override_reason,
+                        "leverage_override_reason": (
+                            existing_trade.leverage_override_reason
+                        ),
                         "entry_price": existing_trade.entry_price,
                         "invalidation_price": existing_trade.invalidation_price,
                         "max_loss_usdt": existing_trade.max_loss_usdt,
@@ -760,8 +870,10 @@ class RedisRepository:
                             )
                         )
                     if "max_loss_usdt" in editable_updates:
-                        updated_fields["max_loss_usdt"] = validate.validate_max_loss_usdt(
-                            editable_updates["max_loss_usdt"]
+                        updated_fields["max_loss_usdt"] = (
+                            validate.validate_max_loss_usdt(
+                                editable_updates["max_loss_usdt"]
+                            )
                         )
                     if "regime" in editable_updates:
                         updated_fields["regime"] = validate.validate_regime(
@@ -792,7 +904,7 @@ class RedisRepository:
                         updated_fields["leverage_override_reason"] = (
                             existing_trade.leverage_override_reason
                         )
-                    # If leverage was explicitly set (even if same value), keep the provided override reason
+                    # If leverage was explicitly set, keep the provided reason.
 
                     # If leverage >= 20 and override reason not provided, require it
                     if (
@@ -804,15 +916,15 @@ class RedisRepository:
                             or editable_updates["leverage_override_reason"] == ""
                         )
                     ):
-                        # Check if we should preserve existing reason (leverage unchanged)
+                        # Preserve the existing reason when leverage did not change.
                         if "leverage" not in editable_updates:
                             updated_fields["leverage_override_reason"] = (
                                 existing_trade.leverage_override_reason
                             )
                         else:
                             msg = (
-                                "leverage_override_reason is required when leverage >= 20. "
-                                "Must be 10-500 characters."
+                                "leverage_override_reason is required when "
+                                "leverage >= 20. Must be 10-500 characters."
                             )
                             raise ValueError(msg)
 
@@ -835,15 +947,17 @@ class RedisRepository:
                                 "invalidation_price",
                                 "max_loss_usdt",
                             }:
-                                update_mapping[field_name] = self._serialize_float(value)
+                                update_mapping[field_name] = self._serialize_float(
+                                    value
+                                )
                             elif field_name == "leverage_override_reason":
                                 if value is not None:
                                     update_mapping[field_name] = value
-                                # If None, don't include in mapping (will be cleared/deleted)
+                                # None is cleared with hdel below.
                             elif field_name == "thesis":
                                 update_mapping[field_name] = value
 
-                    # If leverage_override_reason is being set to None explicitly, we need to delete it
+                    # A None override reason must be deleted from the hash.
                     if (
                         "leverage_override_reason" in editable_updates
                         and editable_updates["leverage_override_reason"] is None
@@ -862,12 +976,19 @@ class RedisRepository:
                         pipe.hset(trade_key_name, mapping=update_mapping)
 
                     # If leverage_override_reason should be cleared/deleted
-                    if updated_fields["leverage_override_reason"] is None and existing_trade.leverage_override_reason is not None:
+                    if (
+                        updated_fields["leverage_override_reason"] is None
+                        and existing_trade.leverage_override_reason is not None
+                    ):
                         if "leverage_override_reason" not in update_mapping:
                             pipe.hdel(trade_key_name, "leverage_override_reason")
 
                     await pipe.execute()
-                    return await self.get_trade(trade_id)
+                    updated_trade = await self.get_trade(trade_id)
+                    if updated_trade is None:
+                        msg = f"Trade {trade_id} disappeared after update."
+                        raise RepositoryError(msg)
+                    return updated_trade
                 except WatchError:
                     continue
 
@@ -996,6 +1117,18 @@ class RedisRepository:
             msg = f"TradeDraft field {field_name} is required."
             raise ValueError(msg)
         return value
+
+    @staticmethod
+    def _require_int(value: Any) -> int:
+        if isinstance(value, bool):
+            msg = "Expected int value, got bool."
+            raise ValueError(msg)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            return int(value)
+        msg = f"Expected int value, got {value!r}."
+        raise ValueError(msg)
 
     @staticmethod
     def _ensure_aware_datetime(value: datetime | None) -> datetime:

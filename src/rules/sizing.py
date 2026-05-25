@@ -45,6 +45,12 @@ def compute_size_cap(
     return factor * min(average_last_five, max_size_ever)
 
 
+def consecutive_loss_count(trades: list[Trade]) -> int:
+    """Count consecutive losing closed trades from the most recent close."""
+
+    return _consecutive_loss_count(_sorted_closed_trades(trades))
+
+
 def _consecutive_loss_count(closed_trades: list[Trade]) -> int:
     streak = 0
     for trade in closed_trades:

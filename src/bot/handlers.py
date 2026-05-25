@@ -12,12 +12,14 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from src.bot import formatting
+from src.bot.edit_closed import ClosedTradeEditService
 from src.bot.forms import TradeFormService
 from src.bot.whitelist import whitelisted
 from src.config import Settings
 from src.db.repo import RedisRepository
 from src.events.bus import EventBus
 from src.models.breach import Breach
+from src.models.conversation import ConversationStep
 from src.models.events import (
     BreachResolution,
     BreachResolvedEvent,
@@ -89,6 +91,7 @@ class TelegramHandlers:
         settings: Settings,
         repo: RedisRepository,
         forms: TradeFormService,
+        edit_closed: ClosedTradeEditService,
         alerts: AlertDispatcher,
         health: MonitorHealth,
         event_bus: EventBus,
@@ -98,6 +101,7 @@ class TelegramHandlers:
         self._settings = settings
         self._repo = repo
         self._forms = forms
+        self._edit_closed = edit_closed
         self._alerts = alerts
         self._health = health
         self._event_bus = event_bus
@@ -122,7 +126,15 @@ class TelegramHandlers:
         if message is None or not message.text:
             return
 
-        result = await self._forms.handle_input(_chat_id(update), message.text)
+        chat_id = _chat_id(update)
+        state = await self._repo.get_conversation_state(chat_id)
+        if state is not None and state.state == ConversationStep.EDIT_CLOSED_CONFIRM:
+            edit_result = await self._edit_closed.resolve(chat_id, message.text)
+            if edit_result is not None:
+                await _reply(update, edit_result.message)
+                return
+
+        result = await self._forms.handle_input(chat_id, message.text)
         if result is None:
             return
 
@@ -328,6 +340,23 @@ class TelegramHandlers:
 
     @whitelisted
     @safe_handler
+    async def edit_closed(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        args = list(getattr(context, "args", []))
+        parsed = self._parse_edit_closed_args(args)
+        if parsed is None:
+            await _reply(update, formatting.edit_closed_usage())
+            return
+
+        trade_id, updates = parsed
+        result = await self._edit_closed.prepare(_chat_id(update), trade_id, updates)
+        await _reply(update, result.message)
+
+    @whitelisted
+    @safe_handler
     async def health(
         self,
         update: Update,
@@ -462,6 +491,31 @@ class TelegramHandlers:
         if days <= 0:
             return None
         return days
+
+    @staticmethod
+    def _parse_edit_closed_args(
+        args: list[str],
+    ) -> tuple[int, dict[str, str]] | None:
+        if len(args) < 2:
+            return None
+        try:
+            trade_id = int(args[0])
+        except ValueError:
+            return None
+        if trade_id <= 0:
+            return None
+
+        updates: dict[str, str] = {}
+        for arg in args[1:]:
+            if "=" not in arg:
+                return None
+            field, value = arg.split("=", 1)
+            if not field:
+                return None
+            updates[field] = value
+        if not updates:
+            return None
+        return trade_id, updates
 
     async def _publish_trade_opened(self, trade: Trade) -> None:
         await self._event_bus.publish(

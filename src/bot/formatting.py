@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from enum import Enum
+
 from src.models.trade import Direction, Trade, TradeStatus
+from src.rules.impact import DisciplineImpact
 from src.stats.calculator import StatsResult
 
 
@@ -237,6 +241,21 @@ EDITABLE_FIELDS = (
     "thesis",
 )
 
+EDIT_CLOSED_FIELDS = (
+    "direction",
+    "size_usdt",
+    "leverage",
+    "leverage_override_reason",
+    "entry_price",
+    "invalidation_price",
+    "max_loss_usdt",
+    "regime",
+    "thesis",
+    "opened_at",
+    "closed_at",
+    "close_price",
+)
+
 
 def edit_usage() -> str:
     fields = ", ".join(EDITABLE_FIELDS)
@@ -289,6 +308,94 @@ def edit_confirmation(trade: Trade, updated_fields: list[str]) -> str:
     )
 
 
+def edit_closed_usage() -> str:
+    fields = ", ".join(EDIT_CLOSED_FIELDS)
+    return (
+        "Usage: /edit_closed <trade_id> <field1>=<value1> "
+        "[<field2>=<value2> ...]\n"
+        f"Editable fields: {fields}"
+    )
+
+
+def edit_closed_not_found(trade_id: int) -> str:
+    return f"Trade {trade_id} not found."
+
+
+def edit_closed_not_closed(trade_id: int) -> str:
+    return f"Trade {trade_id} is not closed. Use /edit for open trades."
+
+
+def edit_closed_invalid_field(field: str) -> str:
+    fields = ", ".join(EDIT_CLOSED_FIELDS)
+    return f"Field '{field}' cannot be edited. Editable fields: {fields}"
+
+
+def edit_closed_validation_error(field: str, message: str) -> str:
+    return f"{field}: {message}"
+
+
+def edit_closed_preview(
+    changes: dict[str, tuple[object, object]],
+    recomputed_pnl: float | None,
+    impact: DisciplineImpact,
+    pnl_override_warning: bool,
+) -> str:
+    lines = ["Preview closed-trade edit:"]
+    for field, (old_value, new_value) in changes.items():
+        lines.append(
+            f"{field}: {_format_field_value(old_value)} "
+            f"→ {_format_field_value(new_value)}"
+        )
+    if recomputed_pnl is not None:
+        lines.append(
+            "Recomputed realized P&L: " f"{_format_signed_amount(recomputed_pnl)} USDT."
+        )
+    lines.extend(
+        [
+            (
+                "Consecutive-loss streak: "
+                f"{impact.streak_before} → {impact.streak_after}."
+            ),
+            (
+                "Active size cap: "
+                f"{_format_optional_cap(impact.cap_before)} → "
+                f"{_format_optional_cap(impact.cap_after)}."
+            ),
+        ]
+    )
+    if pnl_override_warning:
+        lines.append(
+            "This overwrites a prior /setpnl manual P&L override. "
+            "Use /setpnl after confirming if you want a manual P&L value."
+        )
+    lines.append("Reply yes to apply, or no to cancel.")
+    return "\n".join(lines)
+
+
+def edit_closed_applied(trade: Trade, changed_fields: list[str]) -> str:
+    fields = ", ".join(changed_fields)
+    close_price = trade.close_price if trade.close_price is not None else 0.0
+    realized_pnl = trade.realized_pnl if trade.realized_pnl is not None else 0.0
+    return "\n".join(
+        [
+            f"Trade #{trade.id} updated: {fields}.",
+            (
+                f"{trade.direction.value} {_format_amount(trade.size_usdt)} USDT "
+                f"{trade.leverage}x @ {_format_price(trade.entry_price)}"
+            ),
+            (
+                f"Closed at {_format_price(close_price)}. Realized P&L: "
+                f"{_format_signed_amount(realized_pnl)} USDT."
+            ),
+            f"Regime: {trade.regime.value}. Thesis: {trade.thesis}",
+        ]
+    )
+
+
+def edit_closed_cancelled() -> str:
+    return "Closed-trade edit cancelled."
+
+
 def health_status(payload: dict[str, object | None]) -> str:
     lines = [
         f"Websocket: {payload['websocket_status']}",
@@ -325,6 +432,7 @@ def help_overview() -> str:
             "/stats [days]",
             "/setpnl <trade_id> <pnl>",
             "/edit <trade_id> field=value [...]",
+            "/edit_closed <trade_id> field=value [...]",
             "/health",
             "/signals",
             "/help [cmd]",
@@ -347,6 +455,11 @@ def help_for(command: str) -> str:
         "stats": "/stats [days]: Show rolling adherence and P&L stats.",
         "setpnl": "/setpnl <trade_id> <pnl>: Override realized P&L for a closed trade.",
         "edit": "/edit <trade_id> field=value [...]: Edit an open trade.",
+        "edit_closed": (
+            "/edit_closed <trade_id> field=value [...]: Edit a closed trade "
+            "after preview confirmation. Editable fields: "
+            f"{', '.join(EDIT_CLOSED_FIELDS)}."
+        ),
         "health": "/health: Show websocket and Redis health status.",
         "signals": "/signals: Show the v1 intelligence stub response.",
         "help": "/help [cmd]: Show the command list or help for one command.",
@@ -441,6 +554,24 @@ def _format_optional_seconds(value: object | None) -> str:
         return "unknown"
     if isinstance(value, (int, float)):
         return f"{float(value):.1f}s"
+    return str(value)
+
+
+def _format_optional_cap(value: float | None) -> str:
+    if value is None:
+        return "none"
+    return f"{_format_amount(value)} USDT"
+
+
+def _format_field_value(value: object) -> str:
+    if value is None:
+        return "none"
+    if isinstance(value, Enum):
+        return str(value.value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, float):
+        return _trimmed_number(value)
     return str(value)
 
 

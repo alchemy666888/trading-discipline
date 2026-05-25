@@ -8,13 +8,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.bot.edit_closed import ClosedTradeEditService
 from src.bot.forms import TradeFormService
 from src.bot.handlers import TelegramHandlers
 from src.config import Settings
 from src.db.repo import RedisHealthDetails
 from src.events.bus import EventBus
 from src.models.breach import Breach, BreachUserResponse
-from src.models.conversation import ConversationState
+from src.models.conversation import ConversationState, ConversationStep
 from src.models.events import Event, EventType
 from src.models.trade import Direction, Regime, Trade, TradeDraft, TradeStatus
 from src.monitor.health import ApplicationHealthSnapshot
@@ -254,6 +255,24 @@ class InMemoryHandlerRepo:
         self.trades[trade_id] = updated_trade
         return updated_trade
 
+    async def update_closed_trade(
+        self,
+        trade_id: int,
+        *,
+        updates: dict[str, object],
+        recomputed_pnl: float | None,
+    ) -> Trade | None:
+        trade = self.trades.get(trade_id)
+        if trade is None or trade.status != TradeStatus.CLOSED:
+            return None
+        payload = trade.model_dump()
+        payload.update(updates)
+        if recomputed_pnl is not None:
+            payload["realized_pnl"] = recomputed_pnl
+        updated_trade = Trade.model_validate(payload)
+        self.trades[trade_id] = updated_trade
+        return updated_trade
+
     async def get_redis_health(self) -> RedisHealthDetails:
         return RedisHealthDetails(
             connected=True,
@@ -344,6 +363,11 @@ async def test_handlers_new_text_cancel_and_trade_opened_event() -> None:
         settings=_settings(),
         repo=repo,  # type: ignore[arg-type]
         forms=forms,
+        edit_closed=ClosedTradeEditService(
+            repo=repo,  # type: ignore[arg-type]
+            settings=_settings(),
+            now_fn=clock.now,
+        ),
         alerts=RecordingAlerts(),  # type: ignore[arg-type]
         health=FakeHealth(),  # type: ignore[arg-type]
         event_bus=bus,
@@ -408,6 +432,11 @@ async def test_handlers_closed_and_justify_publish_events() -> None:
         settings=_settings(),
         repo=repo,  # type: ignore[arg-type]
         forms=forms,
+        edit_closed=ClosedTradeEditService(
+            repo=repo,  # type: ignore[arg-type]
+            settings=_settings(),
+            now_fn=clock.now,
+        ),
         alerts=alerts,  # type: ignore[arg-type]
         health=FakeHealth(),  # type: ignore[arg-type]
         event_bus=bus,
@@ -473,6 +502,11 @@ async def test_handlers_open_streak_stats_and_setpnl_commands() -> None:
         settings=_settings(),
         repo=repo,  # type: ignore[arg-type]
         forms=TradeFormService(repo=repo, settings=_settings(), now_fn=clock.now),
+        edit_closed=ClosedTradeEditService(
+            repo=repo,  # type: ignore[arg-type]
+            settings=_settings(),
+            now_fn=clock.now,
+        ),
         alerts=RecordingAlerts(),  # type: ignore[arg-type]
         health=FakeHealth(),  # type: ignore[arg-type]
         event_bus=EventBus(),
@@ -523,6 +557,96 @@ async def test_handlers_open_streak_stats_and_setpnl_commands() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handlers_edit_closed_happy_path_previews_and_applies() -> None:
+    """R5.1-R5.5: `/edit_closed` previews impact, then yes persists the edit."""
+
+    repo = InMemoryHandlerRepo()
+    clock = MutableClock(current=datetime(2026, 5, 17, 9, 0, tzinfo=UTC))
+    target = await repo.create_trade(
+        _draft(size_usdt=1000.0, thesis="Closed loss to revise."),
+        opened_at=clock.now(),
+    )
+    closed = await repo.close_trade(
+        target.id,
+        close_price=81000.0,
+        closed_at=clock.now(),
+    )
+    assert closed is not None
+    handlers = _handlers(repo, clock)
+
+    preview_update = FakeUpdate(1)
+    await handlers.edit_closed(
+        preview_update,
+        FakeContext(args=[str(target.id), "close_price=83000"]),
+    )
+
+    preview = preview_update.effective_message.replies[-1]
+    assert "Preview closed-trade edit:" in preview
+    assert "close_price: 81000 → 83000" in preview
+    assert "Recomputed realized P&L:" in preview
+    assert "Consecutive-loss streak:" in preview
+    assert "Active size cap:" in preview
+    assert "Reply yes to apply, or no to cancel." in preview
+    assert repo.trades[target.id].close_price == 81000.0
+
+    confirm_update = FakeUpdate(1, text="yes")
+    await handlers.text_message(confirm_update, FakeContext())
+
+    assert repo.trades[target.id].close_price == 83000.0
+    assert repo.trades[target.id].realized_pnl is not None
+    assert repo.trades[target.id].realized_pnl > 0
+    assert (
+        "Trade #1 updated: close_price." in confirm_update.effective_message.replies[-1]
+    )
+    assert repo.conversations == {}
+
+
+@pytest.mark.asyncio
+async def test_handlers_edit_closed_decline_and_not_closed_paths() -> None:
+    """R1.5 / R5.6: decline leaves history unchanged; open trades redirect."""
+
+    repo = InMemoryHandlerRepo()
+    clock = MutableClock(current=datetime(2026, 5, 17, 9, 0, tzinfo=UTC))
+    closed_target = await repo.create_trade(
+        _draft(size_usdt=1000.0, thesis="Closed trade decline fixture."),
+        opened_at=clock.now(),
+    )
+    closed = await repo.close_trade(
+        closed_target.id,
+        close_price=81000.0,
+        closed_at=clock.now(),
+    )
+    assert closed is not None
+    open_trade = await repo.create_trade(
+        _draft(size_usdt=900.0, thesis="Open trade edit redirect fixture."),
+        opened_at=clock.now(),
+    )
+    handlers = _handlers(repo, clock)
+
+    preview_update = FakeUpdate(1)
+    await handlers.edit_closed(
+        preview_update,
+        FakeContext(args=[str(closed_target.id), "close_price=83000"]),
+    )
+    decline_update = FakeUpdate(1, text="no")
+    await handlers.text_message(decline_update, FakeContext())
+
+    assert decline_update.effective_message.replies == ["Closed-trade edit cancelled."]
+    assert repo.trades[closed_target.id].close_price == 81000.0
+    assert repo.conversations == {}
+
+    not_closed_update = FakeUpdate(1)
+    await handlers.edit_closed(
+        not_closed_update,
+        FakeContext(args=[str(open_trade.id), "regime=range"]),
+    )
+
+    assert not_closed_update.effective_message.replies == [
+        f"Trade {open_trade.id} is not closed. Use /edit for open trades."
+    ]
+
+
+@pytest.mark.asyncio
 async def test_handlers_health_signals_help_unknown_and_empty_open() -> None:
     """REQ-006 / REQ-010: utility commands and empty states return centralized copy."""
 
@@ -532,6 +656,11 @@ async def test_handlers_health_signals_help_unknown_and_empty_open() -> None:
         settings=_settings(),
         repo=repo,  # type: ignore[arg-type]
         forms=TradeFormService(repo=repo, settings=_settings(), now_fn=clock.now),
+        edit_closed=ClosedTradeEditService(
+            repo=repo,  # type: ignore[arg-type]
+            settings=_settings(),
+            now_fn=clock.now,
+        ),
         alerts=RecordingAlerts(),  # type: ignore[arg-type]
         health=FakeHealth(),  # type: ignore[arg-type]
         event_bus=EventBus(),
@@ -559,7 +688,14 @@ async def test_handlers_health_signals_help_unknown_and_empty_open() -> None:
     help_update = FakeUpdate(1)
     await handlers.help(help_update, FakeContext())
     assert help_update.effective_message.replies[-1].startswith("Commands:")
-    assert "/edit <trade_id> field=value [...]" in help_update.effective_message.replies[-1]
+    assert (
+        "/edit <trade_id> field=value [...]"
+        in help_update.effective_message.replies[-1]
+    )
+    assert (
+        "/edit_closed <trade_id> field=value [...]"
+        in help_update.effective_message.replies[-1]
+    )
 
     help_one_update = FakeUpdate(1)
     await handlers.help(help_one_update, FakeContext(args=["closed"]))
@@ -573,12 +709,70 @@ async def test_handlers_health_signals_help_unknown_and_empty_open() -> None:
         "/edit <trade_id> field=value [...]: Edit an open trade."
     ]
 
+    help_edit_closed_update = FakeUpdate(1)
+    await handlers.help(help_edit_closed_update, FakeContext(args=["edit_closed"]))
+    assert "/edit_closed <trade_id> field=value [...]" in (
+        help_edit_closed_update.effective_message.replies[-1]
+    )
+    assert "Editable fields:" in help_edit_closed_update.effective_message.replies[-1]
+
+    edit_closed_usage_update = FakeUpdate(1)
+    await handlers.edit_closed(edit_closed_usage_update, FakeContext(args=[]))
+    assert edit_closed_usage_update.effective_message.replies == [
+        "Usage: /edit_closed <trade_id> <field1>=<value1> "
+        "[<field2>=<value2> ...]\n"
+        "Editable fields: direction, size_usdt, leverage, "
+        "leverage_override_reason, entry_price, invalidation_price, "
+        "max_loss_usdt, regime, thesis, opened_at, closed_at, close_price"
+    ]
+
+    non_whitelisted_update = FakeUpdate(999)
+    await handlers.edit_closed(
+        non_whitelisted_update,
+        FakeContext(args=["1", "regime=range"]),
+    )
+    assert non_whitelisted_update.effective_message.replies == []
+
     unknown_update = FakeUpdate(1)
     await handlers.unknown(unknown_update, FakeContext())
     assert unknown_update.effective_message.replies == ["Unknown command. Use /help."]
+
+    repo.conversations[1] = ConversationState(
+        chat_id=1,
+        state=ConversationStep.EDIT_CLOSED_CONFIRM,
+        partial_trade_json='{"trade_id": 1, "updates": {}, "recomputed_pnl": null}',
+        updated_at=clock.now(),
+    )
+    cancel_update = FakeUpdate(1)
+    await handlers.cancel(cancel_update, FakeContext())
+    assert cancel_update.effective_message.replies == ["Form cancelled."]
+    assert repo.conversations == {}
 
 
 def _calculate_realized_pnl(trade: Trade, close_price: float) -> float:
     size_btc = trade.size_usdt / trade.entry_price
     direction_sign = 1.0 if trade.direction == Direction.LONG else -1.0
     return (close_price - trade.entry_price) * size_btc * direction_sign
+
+
+def _handlers(
+    repo: InMemoryHandlerRepo,
+    clock: MutableClock,
+    *,
+    event_bus: EventBus | None = None,
+) -> TelegramHandlers:
+    return TelegramHandlers(
+        settings=_settings(),
+        repo=repo,  # type: ignore[arg-type]
+        forms=TradeFormService(repo=repo, settings=_settings(), now_fn=clock.now),
+        edit_closed=ClosedTradeEditService(
+            repo=repo,  # type: ignore[arg-type]
+            settings=_settings(),
+            now_fn=clock.now,
+        ),
+        alerts=RecordingAlerts(),  # type: ignore[arg-type]
+        health=FakeHealth(),  # type: ignore[arg-type]
+        event_bus=event_bus or EventBus(),
+        stats_provider=_stats_provider,
+        now_fn=clock.now,
+    )

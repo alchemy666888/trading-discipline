@@ -19,6 +19,7 @@ from telegram.ext import (
 )
 
 from src.bot import formatting
+from src.bot.edit_closed import ClosedTradeEditService
 from src.bot.forms import TradeFormService
 from src.bot.handlers import TelegramHandlers
 from src.config import Settings, load_settings
@@ -49,6 +50,7 @@ class AppRuntime:
     health: MonitorHealth
     monitor: Monitor
     forms: TradeFormService
+    edit_closed: ClosedTradeEditService
     handlers: TelegramHandlers
     weekly_reporter: WeeklyReportScheduler
     application: TelegramApplication | None = None
@@ -241,10 +243,16 @@ def build_runtime(
         settings=settings,
         now_fn=reference_now,
     )
+    edit_closed = ClosedTradeEditService(
+        repo=repo,
+        settings=settings,
+        now_fn=reference_now,
+    )
     handlers = TelegramHandlers(
         settings=settings,
         repo=repo,
         forms=forms,
+        edit_closed=edit_closed,
         alerts=alerts,
         health=health,
         event_bus=event_bus,
@@ -270,6 +278,7 @@ def build_runtime(
         health=health,
         monitor=monitor,
         forms=forms,
+        edit_closed=edit_closed,
         handlers=handlers,
         weekly_reporter=weekly_reporter,
         application=application,
@@ -304,6 +313,9 @@ def wire_handlers(application: Any, handlers: TelegramHandlers) -> None:
 
     application.add_handler(CommandHandler("new", cast(Any, handlers.new)))
     application.add_handler(CommandHandler("edit", cast(Any, handlers.edit)))
+    application.add_handler(
+        CommandHandler("edit_closed", cast(Any, handlers.edit_closed))
+    )
     application.add_handler(CommandHandler("closed", cast(Any, handlers.closed)))
     application.add_handler(CommandHandler("justify", cast(Any, handlers.justify)))
     application.add_handler(CommandHandler("cancel", cast(Any, handlers.cancel)))

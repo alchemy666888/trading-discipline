@@ -180,6 +180,7 @@ async def test_create_runtime_applies_migrations_and_starts_components(
         for command in getattr(handler, "commands", set())
     }
     assert "edit" in command_names
+    assert "edit_closed" in command_names
 
     received: list[EventType] = []
 

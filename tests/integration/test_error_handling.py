@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.bot.edit_closed import ClosedTradeEditService
 from src.bot.forms import TradeFormService
 from src.bot.handlers import TelegramHandlers
 from src.config import Settings
@@ -125,6 +126,11 @@ async def test_handler_exception_replies_with_internal_error_and_keeps_running()
         settings=_settings(),
         repo=MinimalRepo(),  # type: ignore[arg-type]
         forms=forms,
+        edit_closed=ClosedTradeEditService(
+            repo=MinimalRepo(),  # type: ignore[arg-type]
+            settings=_settings(),
+            now_fn=lambda: datetime(2026, 5, 17, 9, 0, tzinfo=UTC),
+        ),
         alerts=SimpleNamespace(),  # type: ignore[arg-type]
         health=SimpleNamespace(),  # type: ignore[arg-type]
         event_bus=EventBus(),

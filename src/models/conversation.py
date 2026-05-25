@@ -9,7 +9,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, field_validator
 
 
 class ConversationStep(StrEnum):
-    """Conversation states for the `/new` flow."""
+    """Conversation states for conversational bot flows."""
 
     IDLE = "IDLE"
     DIRECTION = "DIRECTION"
@@ -22,6 +22,7 @@ class ConversationStep(StrEnum):
     REGIME = "REGIME"
     THESIS = "THESIS"
     CONFIRM = "CONFIRM"
+    EDIT_CLOSED_CONFIRM = "EDIT_CLOSED_CONFIRM"
 
 
 class ConversationState(BaseModel):
