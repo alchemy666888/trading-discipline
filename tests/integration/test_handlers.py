@@ -481,9 +481,15 @@ async def test_handlers_open_streak_stats_and_setpnl_commands() -> None:
     )
 
     open_update = FakeUpdate(1)
+    repo.create_breach_fixture(
+        trade_id=open_trade.id,
+        detected_at=clock.now(),
+        breach_price=80990.0,
+    )
     await handlers.open(open_update, FakeContext())
     assert "Open trades:" in open_update.effective_message.replies[-1]
     assert f"#{open_trade.id}" in open_update.effective_message.replies[-1]
+    assert "active breach" in open_update.effective_message.replies[-1]
 
     streak_update = FakeUpdate(1)
     await handlers.streak(streak_update, FakeContext())
@@ -553,11 +559,18 @@ async def test_handlers_health_signals_help_unknown_and_empty_open() -> None:
     help_update = FakeUpdate(1)
     await handlers.help(help_update, FakeContext())
     assert help_update.effective_message.replies[-1].startswith("Commands:")
+    assert "/edit <trade_id> field=value [...]" in help_update.effective_message.replies[-1]
 
     help_one_update = FakeUpdate(1)
     await handlers.help(help_one_update, FakeContext(args=["closed"]))
     assert help_one_update.effective_message.replies == [
         "/closed <price> or /closed <id> <price>: Close an open trade."
+    ]
+
+    help_edit_update = FakeUpdate(1)
+    await handlers.help(help_edit_update, FakeContext(args=["edit"]))
+    assert help_edit_update.effective_message.replies == [
+        "/edit <trade_id> field=value [...]: Edit an open trade."
     ]
 
     unknown_update = FakeUpdate(1)

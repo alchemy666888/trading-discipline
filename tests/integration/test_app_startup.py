@@ -174,6 +174,12 @@ async def test_create_runtime_applies_migrations_and_starts_components(
 
     assert await redis_client.get(schema_version_key()) == "1"
     assert len(fake_app.handlers) >= 13
+    command_names = {
+        command
+        for handler in fake_app.handlers
+        for command in getattr(handler, "commands", set())
+    }
+    assert "edit" in command_names
 
     received: list[EventType] = []
 

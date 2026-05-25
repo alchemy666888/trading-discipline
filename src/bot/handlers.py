@@ -143,7 +143,17 @@ class TelegramHandlers:
         if not trades:
             await _reply(update, formatting.no_open_trades())
             return
-        await _reply(update, formatting.open_trades(trades))
+        active_breach_trade_ids: set[int] = set()
+        for trade in trades:
+            if await self._repo.get_open_breach(trade.id) is not None:
+                active_breach_trade_ids.add(trade.id)
+        await _reply(
+            update,
+            formatting.open_trades(
+                trades,
+                active_breach_trade_ids=active_breach_trade_ids,
+            ),
+        )
 
     @whitelisted
     @safe_handler
@@ -280,6 +290,41 @@ class TelegramHandlers:
             return
         streak = await self._repo.consecutive_loss_count()
         await _reply(update, formatting.setpnl_confirmation(trade.id, pnl, streak))
+
+    @whitelisted
+    @safe_handler
+    async def edit(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        args = list(getattr(context, "args", []))
+        if len(args) < 2:
+            await _reply(update, formatting.edit_usage())
+            return
+
+        # Extract trade_id from first argument
+        try:
+            trade_id = int(args[0])
+        except ValueError:
+            await _reply(update, formatting.edit_usage())
+            return
+
+        # Parse field=value pairs from remaining arguments
+        updates: dict[str, str] = {}
+        for arg in args[1:]:
+            if "=" in arg:
+                field, value = arg.split("=", 1)
+                updates[field] = value
+
+        if not updates:
+            await _reply(update, formatting.edit_usage())
+            return
+
+        # Call repository.update_trade() with the updates
+        # Validation and confirmation messages are handled in later tasks
+        trade = await self._repo.update_trade(trade_id, updates)
+        await _reply(update, f"Trade #{trade.id} updated.")
 
     @whitelisted
     @safe_handler

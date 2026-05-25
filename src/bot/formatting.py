@@ -94,12 +94,20 @@ def no_open_trades() -> str:
     return "No open trades. Use /new to commit one."
 
 
-def open_trades(trades: list[Trade]) -> str:
+def open_trades(
+    trades: list[Trade],
+    *,
+    active_breach_trade_ids: set[int] | None = None,
+) -> str:
+    active_breach_trade_ids = active_breach_trade_ids or set()
     lines = ["Open trades:"]
     for trade in trades:
-        status_suffix = ""
+        suffixes: list[str] = []
         if trade.status == TradeStatus.OPEN_OVERRIDE:
-            status_suffix = " [OPEN_OVERRIDE]"
+            suffixes.append("OPEN_OVERRIDE")
+        if trade.id in active_breach_trade_ids:
+            suffixes.append("active breach")
+        status_suffix = f" [{', '.join(suffixes)}]" if suffixes else ""
         lines.append(
             f"#{trade.id} {trade.direction.value} "
             f"{_format_amount(trade.size_usdt)} USDT @ "
@@ -217,6 +225,70 @@ def justify_usage() -> str:
     return "Usage: /justify <trade_id> <reason> or /justify <reason>"
 
 
+EDITABLE_FIELDS = (
+    "direction",
+    "size_usdt",
+    "leverage",
+    "leverage_override_reason",
+    "entry_price",
+    "invalidation_price",
+    "max_loss_usdt",
+    "regime",
+    "thesis",
+)
+
+
+def edit_usage() -> str:
+    fields = ", ".join(EDITABLE_FIELDS)
+    return (
+        "Usage: /edit <trade_id> <field1>=<value1> [<field2>=<value2> ...]\n"
+        f"Editable fields: {fields}"
+    )
+
+
+def edit_invalid_format() -> str:
+    return edit_usage()
+
+
+def edit_invalid_field(field: str) -> str:
+    fields = ", ".join(EDITABLE_FIELDS)
+    return f"Field '{field}' cannot be edited. Editable fields: {fields}"
+
+
+def edit_trade_not_found(trade_id: int) -> str:
+    return f"Trade {trade_id} not found"
+
+
+def edit_trade_closed(trade_id: int) -> str:
+    return f"Trade {trade_id} is closed, only open trades can be edited"
+
+
+def edit_validation_error(field: str, message: str) -> str:
+    return f"{field}: {message}"
+
+
+def edit_high_leverage_no_reason() -> str:
+    return "Leverage >= 20 requires justification"
+
+
+def edit_confirmation(trade: Trade, updated_fields: list[str]) -> str:
+    fields = ", ".join(updated_fields)
+    return "\n".join(
+        [
+            f"Trade #{trade.id} updated: {fields}.",
+            (
+                f"{trade.direction.value} {_format_amount(trade.size_usdt)} USDT "
+                f"{trade.leverage}x @ {_format_price(trade.entry_price)}"
+            ),
+            (
+                f"Invalidation: {_format_price(trade.invalidation_price)}. "
+                f"Max loss: {_format_amount(trade.max_loss_usdt)} USDT."
+            ),
+            f"Regime: {trade.regime.value}. Thesis: {trade.thesis}",
+        ]
+    )
+
+
 def health_status(payload: dict[str, object | None]) -> str:
     lines = [
         f"Websocket: {payload['websocket_status']}",
@@ -252,6 +324,7 @@ def help_overview() -> str:
             "/streak",
             "/stats [days]",
             "/setpnl <trade_id> <pnl>",
+            "/edit <trade_id> field=value [...]",
             "/health",
             "/signals",
             "/help [cmd]",
@@ -273,6 +346,7 @@ def help_for(command: str) -> str:
         "streak": "/streak: Show the consecutive-loss streak and active size cap.",
         "stats": "/stats [days]: Show rolling adherence and P&L stats.",
         "setpnl": "/setpnl <trade_id> <pnl>: Override realized P&L for a closed trade.",
+        "edit": "/edit <trade_id> field=value [...]: Edit an open trade.",
         "health": "/health: Show websocket and Redis health status.",
         "signals": "/signals: Show the v1 intelligence stub response.",
         "help": "/help [cmd]: Show the command list or help for one command.",

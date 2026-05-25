@@ -303,6 +303,7 @@ def wire_handlers(application: Any, handlers: TelegramHandlers) -> None:
     """Register command and text handlers on the PTB application."""
 
     application.add_handler(CommandHandler("new", cast(Any, handlers.new)))
+    application.add_handler(CommandHandler("edit", cast(Any, handlers.edit)))
     application.add_handler(CommandHandler("closed", cast(Any, handlers.closed)))
     application.add_handler(CommandHandler("justify", cast(Any, handlers.justify)))
     application.add_handler(CommandHandler("cancel", cast(Any, handlers.cancel)))

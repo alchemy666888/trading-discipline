@@ -18,11 +18,59 @@ from src.models.alert import Alert
 from src.models.breach import Breach, BreachUserResponse
 from src.models.conversation import ConversationState
 from src.models.signal import Severity, Signal
-from src.models.trade import Direction, Trade, TradeDraft, TradeStatus
+from src.models.trade import Direction, Regime, Trade, TradeDraft, TradeStatus
+from src.rules import validation as validate
 
 T = TypeVar("T")
 
 _SCRIPT_DIR = Path(__file__).resolve().parent / "scripts"
+
+# Fields that cannot be edited after trade creation
+NON_EDITABLE_FIELDS: frozenset[str] = frozenset({
+    "id",
+    "opened_at",
+    "closed_at",
+    "close_price",
+    "realized_pnl",
+    "status",
+    "size_reduction_enforced",
+})
+
+# Fields that can be edited on open trades
+EDITABLE_FIELDS: frozenset[str] = frozenset({
+    "direction",
+    "size_usdt",
+    "leverage",
+    "leverage_override_reason",
+    "entry_price",
+    "invalidation_price",
+    "max_loss_usdt",
+    "regime",
+    "thesis",
+})
+
+
+def filter_editable_fields(updates: dict[str, Any]) -> dict[str, Any]:
+    """Filter a dict of field updates to only include editable fields.
+
+    Rejects any keys that are in NON_EDITABLE_FIELDS (id, opened_at, closed_at,
+    close_price, realized_pnl, status, size_reduction_enforced).
+
+    Args:
+        updates: Raw dict of field updates from edit command.
+
+    Returns:
+        Dict containing only editable fields.
+
+    Example:
+        >>> filter_editable_fields({"size_usdt": 1000, "id": 1})
+        {"size_usdt": 1000}
+    """
+    return {
+        key: value
+        for key, value in updates.items()
+        if key not in NON_EDITABLE_FIELDS
+    }
 
 
 class RepositoryError(RuntimeError):
@@ -600,6 +648,224 @@ class RedisRepository:
                             "realized_pnl": self._serialize_float(realized_pnl),
                         },
                     )
+                    await pipe.execute()
+                    return await self.get_trade(trade_id)
+                except WatchError:
+                    continue
+
+    async def update_trade(
+        self,
+        trade_id: int,
+        updates: dict[str, Any],
+    ) -> Trade:
+        """Update editable fields on an open trade atomically.
+
+        Validates that the trade exists and is in OPEN or OPEN_OVERRIDE status.
+        Validates all provided fields using the same rules as /new command.
+        Uses Redis WATCH/MULTI/EXEC for atomic updates.
+
+        Args:
+            trade_id: ID of the trade to update.
+            updates: Dict of field names to new values.
+
+        Returns:
+            Updated Trade object.
+
+        Raises:
+            ValueError: If trade doesn't exist, is closed, or validation fails.
+        """
+        # Filter to only editable fields
+        editable_updates = filter_editable_fields(updates)
+
+        if not editable_updates:
+            # Nothing to update - just return current trade
+            trade = await self.get_trade(trade_id)
+            if trade is None:
+                msg = f"Trade {trade_id} not found."
+                raise ValueError(msg)
+            return trade
+
+        trade_key_name = keyspace.trade_key(trade_id)
+
+        async with self._client.pipeline() as pipe:
+            while True:
+                try:
+                    await pipe.watch(trade_key_name)
+                    trade_data = await self._resolve_redis_call(
+                        pipe.hgetall(trade_key_name)
+                    )
+                    if not trade_data:
+                        await pipe.unwatch()  # type: ignore[no-untyped-call]
+                        msg = f"Trade {trade_id} not found."
+                        raise ValueError(msg)
+
+                    # Deserialize to validate current state
+                    existing_trade = self._deserialize_trade(trade_data)
+
+                    # Validate trade is open
+                    if existing_trade.status not in {
+                        TradeStatus.OPEN,
+                        TradeStatus.OPEN_OVERRIDE,
+                    }:
+                        await pipe.unwatch()  # type: ignore[no-untyped-call]
+                        msg = (
+                            f"Trade {trade_id} is not open. "
+                            "Only open trades can be edited."
+                        )
+                        raise ValueError(msg)
+
+                    # Validate and apply each editable field
+                    # Start with existing values, apply updates
+                    updated_fields: dict[str, Any] = {
+                        "direction": existing_trade.direction,
+                        "size_usdt": existing_trade.size_usdt,
+                        "leverage": existing_trade.leverage,
+                        "leverage_override_reason": existing_trade.leverage_override_reason,
+                        "entry_price": existing_trade.entry_price,
+                        "invalidation_price": existing_trade.invalidation_price,
+                        "max_loss_usdt": existing_trade.max_loss_usdt,
+                        "regime": existing_trade.regime,
+                        "thesis": existing_trade.thesis,
+                    }
+
+                    # Apply validated updates
+                    if "direction" in editable_updates:
+                        updated_fields["direction"] = validate.validate_direction(
+                            editable_updates["direction"]
+                        )
+                    if "size_usdt" in editable_updates:
+                        updated_fields["size_usdt"] = validate.validate_size_usdt(
+                            editable_updates["size_usdt"]
+                        )
+                    if "leverage" in editable_updates:
+                        updated_fields["leverage"] = validate.validate_leverage(
+                            editable_updates["leverage"]
+                        )
+                    if "leverage_override_reason" in editable_updates:
+                        value = editable_updates["leverage_override_reason"]
+                        if value is not None and value != "":
+                            updated_fields["leverage_override_reason"] = (
+                                validate.validate_leverage_override_reason(value)
+                            )
+                        else:
+                            updated_fields["leverage_override_reason"] = None
+                    if "entry_price" in editable_updates:
+                        updated_fields["entry_price"] = validate.validate_entry_price(
+                            editable_updates["entry_price"]
+                        )
+                    if "invalidation_price" in editable_updates:
+                        updated_fields["invalidation_price"] = (
+                            validate.validate_invalidation_price(
+                                editable_updates["invalidation_price"]
+                            )
+                        )
+                    if "max_loss_usdt" in editable_updates:
+                        updated_fields["max_loss_usdt"] = validate.validate_max_loss_usdt(
+                            editable_updates["max_loss_usdt"]
+                        )
+                    if "regime" in editable_updates:
+                        updated_fields["regime"] = validate.validate_regime(
+                            editable_updates["regime"]
+                        )
+                    if "thesis" in editable_updates:
+                        updated_fields["thesis"] = validate.validate_thesis(
+                            editable_updates["thesis"]
+                        )
+
+                    # Validate invalidation price side
+                    validate.validate_invalidation_side(
+                        direction=updated_fields["direction"],
+                        entry_price=updated_fields["entry_price"],
+                        invalidation_price=updated_fields["invalidation_price"],
+                    )
+
+                    # Handle leverage_override_reason based on leverage changes
+                    # If leverage was reduced below 20, clear the override reason
+                    original_leverage = existing_trade.leverage
+                    new_leverage = updated_fields["leverage"]
+
+                    if original_leverage >= 20 and new_leverage < 20:
+                        # Leverage reduced below 20 - clear override reason
+                        updated_fields["leverage_override_reason"] = None
+                    elif "leverage" not in editable_updates:
+                        # Leverage unchanged - preserve existing override reason
+                        updated_fields["leverage_override_reason"] = (
+                            existing_trade.leverage_override_reason
+                        )
+                    # If leverage was explicitly set (even if same value), keep the provided override reason
+
+                    # If leverage >= 20 and override reason not provided, require it
+                    if (
+                        new_leverage >= 20
+                        and updated_fields["leverage_override_reason"] is None
+                        and (
+                            "leverage_override_reason" not in editable_updates
+                            or editable_updates["leverage_override_reason"] is None
+                            or editable_updates["leverage_override_reason"] == ""
+                        )
+                    ):
+                        # Check if we should preserve existing reason (leverage unchanged)
+                        if "leverage" not in editable_updates:
+                            updated_fields["leverage_override_reason"] = (
+                                existing_trade.leverage_override_reason
+                            )
+                        else:
+                            msg = (
+                                "leverage_override_reason is required when leverage >= 20. "
+                                "Must be 10-500 characters."
+                            )
+                            raise ValueError(msg)
+
+                    # Build update mapping
+                    update_mapping: dict[str, str] = {}
+
+                    # Only add fields that changed
+                    for field_name in EDITABLE_FIELDS:
+                        if field_name in updated_fields:
+                            value = updated_fields[field_name]
+                            if field_name == "direction":
+                                update_mapping[field_name] = value.value
+                            elif field_name == "regime":
+                                update_mapping[field_name] = value.value
+                            elif field_name == "leverage":
+                                update_mapping[field_name] = str(value)
+                            elif field_name in {
+                                "size_usdt",
+                                "entry_price",
+                                "invalidation_price",
+                                "max_loss_usdt",
+                            }:
+                                update_mapping[field_name] = self._serialize_float(value)
+                            elif field_name == "leverage_override_reason":
+                                if value is not None:
+                                    update_mapping[field_name] = value
+                                # If None, don't include in mapping (will be cleared/deleted)
+                            elif field_name == "thesis":
+                                update_mapping[field_name] = value
+
+                    # If leverage_override_reason is being set to None explicitly, we need to delete it
+                    if (
+                        "leverage_override_reason" in editable_updates
+                        and editable_updates["leverage_override_reason"] is None
+                    ) or (
+                        updated_fields["leverage_override_reason"] is None
+                        and existing_trade.leverage_override_reason is not None
+                        and "leverage_override_reason" not in editable_updates
+                        and original_leverage >= 20
+                        and new_leverage < 20
+                    ):
+                        # Delete the field from Redis
+                        pass  # Will handle below
+
+                    pipe.multi()  # type: ignore[no-untyped-call]
+                    if update_mapping:
+                        pipe.hset(trade_key_name, mapping=update_mapping)
+
+                    # If leverage_override_reason should be cleared/deleted
+                    if updated_fields["leverage_override_reason"] is None and existing_trade.leverage_override_reason is not None:
+                        if "leverage_override_reason" not in update_mapping:
+                            pipe.hdel(trade_key_name, "leverage_override_reason")
+
                     await pipe.execute()
                     return await self.get_trade(trade_id)
                 except WatchError:

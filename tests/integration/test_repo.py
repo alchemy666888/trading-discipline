@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from redis.asyncio import Redis
 
 from src.db.repo import RedisRepository
@@ -270,3 +271,256 @@ async def test_repo_consecutive_loss_count_ignores_breakeven(
 
     stored_trade = await redis_repo.get_trade(losing_trade_2.id)
     assert stored_trade is not None
+
+
+async def test_update_trade_nonexistent_returns_error(
+    redis_repo: RedisRepository,
+) -> None:
+    """REQ-1.3: updating non-existent trade returns error with 'not found' message."""
+
+    with pytest.raises(ValueError) as exc_info:
+        await redis_repo.update_trade(99999, {"size_usdt": 1000.0})
+
+    assert "not found" in str(exc_info.value).lower()
+
+
+async def test_update_trade_closed_returns_error(
+    redis_repo: RedisRepository,
+) -> None:
+    """REQ-1.5: updating closed trade returns error with 'not open' message."""
+
+    # Create and close a trade
+    trade = await redis_repo.create_trade(
+        TradeDraft(
+            direction=Direction.LONG,
+            size_usdt=1000.0,
+            leverage=5,
+            entry_price=80000.0,
+            invalidation_price=79000.0,
+            max_loss_usdt=20.0,
+            regime=Regime.UPTREND,
+            thesis="Closed trade thesis is sufficiently descriptive.",
+        ),
+        opened_at=_now(),
+    )
+    await redis_repo.close_trade(
+        trade.id,
+        close_price=79000.0,
+        closed_at=_now() + timedelta(minutes=1),
+    )
+
+    # Attempt to update closed trade should fail
+    with pytest.raises(ValueError) as exc_info:
+        await redis_repo.update_trade(trade.id, {"size_usdt": 2000.0})
+
+    assert "not open" in str(exc_info.value).lower()
+
+
+async def test_update_trade_only_editable_fields_modified(
+    redis_repo: RedisRepository,
+) -> None:
+    """REQ-1.7: updating trade only modifies specified editable fields."""
+
+    # Create a trade
+    trade = await redis_repo.create_trade(
+        TradeDraft(
+            direction=Direction.LONG,
+            size_usdt=1000.0,
+            leverage=5,
+            entry_price=80000.0,
+            invalidation_price=79000.0,
+            max_loss_usdt=20.0,
+            regime=Regime.UPTREND,
+            thesis="Original thesis for edit test is sufficiently descriptive.",
+        ),
+        opened_at=_now(),
+    )
+
+    # Update only size_usdt and regime
+    updated = await redis_repo.update_trade(trade.id, {
+        "size_usdt": 2000.0,
+        "regime": "downtrend",
+    })
+
+    # Check that only the specified fields changed
+    assert updated.size_usdt == 2000.0
+    assert updated.regime == Regime.DOWNTREND
+
+    # Check that other fields preserved their values
+    assert updated.direction == Direction.LONG
+    assert updated.leverage == 5
+    assert updated.entry_price == 80000.0
+    assert updated.invalidation_price == 79000.0
+    assert updated.max_loss_usdt == 20.0
+    assert updated.thesis == "Original thesis for edit test is sufficiently descriptive."
+
+
+async def test_update_trade_non_editable_fields_preserved(
+    redis_repo: RedisRepository,
+) -> None:
+    """REQ-2.9: non-editable fields are preserved after update (id, opened_at, closed_at, close_price, realized_pnl, status, size_reduction_enforced)."""
+
+    # Create a trade
+    trade = await redis_repo.create_trade(
+        TradeDraft(
+            direction=Direction.LONG,
+            size_usdt=1000.0,
+            leverage=5,
+            entry_price=80000.0,
+            invalidation_price=79000.0,
+            max_loss_usdt=20.0,
+            regime=Regime.UPTREND,
+            thesis="Thesis for non-editable fields test is descriptive.",
+        ),
+        opened_at=_now(),
+    )
+
+    original_id = trade.id
+    original_opened_at = trade.opened_at
+    original_status = trade.status
+    original_size_reduction_enforced = trade.size_reduction_enforced
+
+    # Update some editable fields
+    await redis_repo.update_trade(trade.id, {
+        "size_usdt": 2000.0,
+        "thesis": "Updated thesis for testing non-editable fields preservation.",
+    })
+
+    # Reload and verify non-editable fields unchanged
+    updated = await redis_repo.get_trade(trade.id)
+    assert updated is not None
+
+    assert updated.id == original_id
+    assert updated.opened_at == original_opened_at
+    assert updated.status == original_status
+    assert updated.size_reduction_enforced == original_size_reduction_enforced
+    # These should still be None for open trade
+    assert updated.closed_at is None
+    assert updated.close_price is None
+    assert updated.realized_pnl is None
+async def test_update_trade_leverage_reduction_clears_override_reason(
+    redis_repo: RedisRepository,
+) -> None:
+    """REQ-3.4: When leverage is reduced from >=20 to <20, the leverage_override_reason is cleared."""
+
+    # Create a trade with high leverage and override reason
+    trade = await redis_repo.create_trade(
+        TradeDraft(
+            direction=Direction.LONG,
+            size_usdt=1000.0,
+            leverage=25,
+            leverage_override_reason="Tight stop around news event.",
+            entry_price=80000.0,
+            invalidation_price=79000.0,
+            max_loss_usdt=20.0,
+            regime=Regime.UPTREND,
+            thesis="Testing leverage reduction clears override reason.",
+        ),
+        opened_at=_now(),
+    )
+
+    # Verify override reason exists
+    assert trade.leverage_override_reason == "Tight stop around news event."
+
+    # Reduce leverage below 20
+    updated = await redis_repo.update_trade(trade.id, {
+        "leverage": 10,
+    })
+
+    # Override reason should be cleared
+    assert updated.leverage == 10
+    assert updated.leverage_override_reason is None
+
+
+async def test_update_trade_leverage_unchanged_preserves_override_reason(
+    redis_repo: RedisRepository,
+) -> None:
+    """REQ-3.3: When leverage is unchanged, the existing leverage_override_reason is preserved."""
+
+    # Create a trade with high leverage and override reason
+    trade = await redis_repo.create_trade(
+        TradeDraft(
+            direction=Direction.LONG,
+            size_usdt=1000.0,
+            leverage=30,
+            leverage_override_reason="Major support level with tight stop.",
+            entry_price=80000.0,
+            invalidation_price=79000.0,
+            max_loss_usdt=20.0,
+            regime=Regime.UPTREND,
+            thesis="Testing leverage unchanged preserves override reason.",
+        ),
+        opened_at=_now(),
+    )
+
+    # Verify override reason exists
+    assert trade.leverage_override_reason == "Major support level with tight stop."
+
+    # Update something without changing leverage
+    updated = await redis_repo.update_trade(trade.id, {
+        "thesis": "Updated thesis text.",
+    })
+
+    # Override reason should be preserved
+    assert updated.leverage == 30
+    assert updated.leverage_override_reason == "Major support level with tight stop."
+    assert updated.thesis == "Updated thesis text."
+
+
+async def test_update_trade_high_leverage_without_override_reason_fails(
+    redis_repo: RedisRepository,
+) -> None:
+    """REQ-3.1: When leverage >= 20 and no override reason is provided, raise ValueError."""
+
+    # Create a trade with low leverage
+    trade = await redis_repo.create_trade(
+        TradeDraft(
+            direction=Direction.LONG,
+            size_usdt=1000.0,
+            leverage=10,
+            entry_price=80000.0,
+            invalidation_price=79000.0,
+            max_loss_usdt=20.0,
+            regime=Regime.UPTREND,
+            thesis="Testing high leverage without override reason fails.",
+        ),
+        opened_at=_now(),
+    )
+
+    # Attempt to increase leverage to >=20 without override reason should fail
+    with pytest.raises(ValueError) as exc_info:
+        await redis_repo.update_trade(trade.id, {
+            "leverage": 25,
+        })
+
+    assert "leverage_override_reason" in str(exc_info.value).lower()
+
+
+async def test_update_trade_high_leverage_with_override_reason_succeeds(
+    redis_repo: RedisRepository,
+) -> None:
+    """REQ-3.1: When leverage >= 20 and valid override reason is provided, the update succeeds."""
+
+    # Create a trade with low leverage
+    trade = await redis_repo.create_trade(
+        TradeDraft(
+            direction=Direction.LONG,
+            size_usdt=1000.0,
+            leverage=10,
+            entry_price=80000.0,
+            invalidation_price=79000.0,
+            max_loss_usdt=20.0,
+            regime=Regime.UPTREND,
+            thesis="Testing high leverage with override reason succeeds.",
+        ),
+        opened_at=_now(),
+    )
+
+    # Increase leverage to >=20 with valid override reason
+    updated = await redis_repo.update_trade(trade.id, {
+        "leverage": 30,
+        "leverage_override_reason": "Strong momentum with tight stop.",
+    })
+
+    assert updated.leverage == 30
+    assert updated.leverage_override_reason == "Strong momentum with tight stop."
