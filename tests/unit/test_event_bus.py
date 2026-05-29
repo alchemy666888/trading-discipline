@@ -34,6 +34,7 @@ def _now() -> datetime:
 def _sample_trade() -> Trade:
     return Trade(
         id=11,
+        symbol="BTC",
         direction=Direction.LONG,
         size_usdt=2000.0,
         leverage=5,
@@ -65,7 +66,7 @@ async def test_event_bus_delivers_events_in_publish_order() -> None:
         bus.subscribe(event_type, handler)
 
     events = [
-        TickEvent(ts=_now(), payload=TickPayload(price=82010.0)),
+        TickEvent(ts=_now(), payload=TickPayload(symbol="BTC", price=82010.0)),
         BreachDetectedEvent(
             ts=_now(),
             payload=BreachDetectedPayload(trade_id=11, breach_id=1, price=80990.0),
@@ -117,7 +118,9 @@ async def test_event_bus_isolates_failing_subscribers() -> None:
     bus.subscribe(EventType.TICK, bad_handler)
     bus.subscribe(EventType.TICK, good_handler)
 
-    await bus.publish(TickEvent(ts=_now(), payload=TickPayload(price=82010.0)))
+    await bus.publish(
+        TickEvent(ts=_now(), payload=TickPayload(symbol="BTC", price=82010.0))
+    )
 
     assert received == ["bad", "good"]
 
@@ -127,4 +130,6 @@ async def test_event_bus_publish_without_subscribers_is_noop() -> None:
 
     bus = EventBus()
 
-    await bus.publish(TickEvent(ts=_now(), payload=TickPayload(price=82010.0)))
+    await bus.publish(
+        TickEvent(ts=_now(), payload=TickPayload(symbol="BTC", price=82010.0))
+    )

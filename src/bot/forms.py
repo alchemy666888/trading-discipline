@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TypeVar
+from typing import Protocol, TypeVar
 
 import structlog
 
@@ -29,6 +29,7 @@ from src.rules.validation import (
     validate_max_loss_usdt,
     validate_regime,
     validate_size_usdt,
+    validate_symbol,
     validate_thesis,
 )
 
@@ -43,6 +44,17 @@ class FormResult:
     created_trade: Trade | None = None
 
 
+class UniverseFetcher(Protocol):
+    """Adapter surface needed by the symbol step."""
+
+    async def fetch_universe(self) -> list[str]:
+        """Fetch canonical Hyperliquid perpetual symbols."""
+
+
+class UniverseUnavailableError(RuntimeError):
+    """Raised when no market universe can be used for validation."""
+
+
 class TradeFormService:
     """Persisted `/new` workflow backed by Redis conversation state."""
 
@@ -51,10 +63,12 @@ class TradeFormService:
         *,
         repo: RedisRepository,
         settings: Settings,
+        universe_fetcher: UniverseFetcher | None = None,
         now_fn: Callable[[], datetime] | None = None,
     ) -> None:
         self._repo = repo
         self._settings = settings
+        self._universe_fetcher = universe_fetcher
         self._now = now_fn or (lambda: datetime.now(tz=UTC))
         self._logger = structlog.get_logger(__name__)
 
@@ -67,10 +81,10 @@ class TradeFormService:
 
         await self._persist_state(
             chat_id=chat_id,
-            step=ConversationStep.DIRECTION,
+            step=ConversationStep.SYMBOL,
             draft=TradeDraft(),
         )
-        return FormResult(message=formatting.prompt_direction())
+        return FormResult(message=formatting.prompt_symbol())
 
     async def cancel(self, chat_id: int) -> FormResult:
         """Abort the current form, if any."""
@@ -92,6 +106,8 @@ class TradeFormService:
 
         draft = self._draft_from_state(state)
 
+        if state.state == ConversationStep.SYMBOL:
+            return await self._handle_symbol(chat_id, draft, text)
         if state.state == ConversationStep.DIRECTION:
             return await self._handle_direction(chat_id, draft, text)
         if state.state == ConversationStep.SIZE:
@@ -117,6 +133,31 @@ class TradeFormService:
     @property
     def _timeout_seconds(self) -> int:
         return self._settings.form_timeout_seconds
+
+    async def _handle_symbol(
+        self,
+        chat_id: int,
+        draft: TradeDraft,
+        text: str,
+    ) -> FormResult:
+        normalized_input = text.strip().upper()
+        try:
+            universe = await self._universe_for_validation()
+        except UniverseUnavailableError:
+            return FormResult(message=formatting.symbol_universe_unavailable())
+
+        try:
+            draft.symbol = validate_symbol(text, universe)
+        except ValueError:
+            self._logger.info("symbol_rejected", symbol=normalized_input)
+            return FormResult(message=formatting.symbol_unknown(normalized_input))
+
+        await self._persist_state(
+            chat_id=chat_id,
+            step=ConversationStep.DIRECTION,
+            draft=draft,
+        )
+        return FormResult(message=formatting.prompt_direction())
 
     async def _handle_direction(
         self,
@@ -156,7 +197,9 @@ class TradeFormService:
                 )
             )
 
-        recent_trades = await self._repo.list_closed_trades()
+        recent_trades = await self._repo.list_closed_trades(
+            symbol=self._require(draft.symbol),
+        )
         cap = compute_size_cap(
             RuleContext(trade_draft=draft, recent_trades=recent_trades),
             self._settings.consecutive_loss_threshold,
@@ -386,6 +429,44 @@ class TradeFormService:
             age_seconds=age_seconds,
         )
         return None, True
+
+    async def _universe_for_validation(self) -> set[str]:
+        cached = await self._repo.get_universe()
+        if cached is not None:
+            cached_symbols, fetched_at = cached
+            if self._is_universe_fresh(fetched_at):
+                return cached_symbols
+
+        try:
+            refreshed_symbols = await self._refresh_universe()
+        except Exception as exc:
+            if cached is not None:
+                self._logger.warning("universe_refresh_failed", error=str(exc))
+                return cached[0]
+            self._logger.warning("universe_refresh_failed", error=str(exc))
+            raise UniverseUnavailableError from exc
+        return set(refreshed_symbols)
+
+    async def _refresh_universe(self) -> list[str]:
+        if self._universe_fetcher is None:
+            msg = "universe fetcher is not configured."
+            raise UniverseUnavailableError(msg)
+        symbols = await self._universe_fetcher.fetch_universe()
+        fetched_at = self._now()
+        await self._repo.set_universe(symbols, fetched_at)
+        self._logger.info(
+            "universe_refreshed",
+            symbol_count=len(symbols),
+            fetched_at=fetched_at.isoformat(),
+        )
+        return symbols
+
+    def _is_universe_fresh(self, fetched_at: datetime) -> bool:
+        reference = fetched_at
+        if reference.tzinfo is None:
+            reference = reference.replace(tzinfo=UTC)
+        age_seconds = (self._now() - reference).total_seconds()
+        return age_seconds <= self._settings.hyperliquid_universe_stale_seconds
 
     async def _persist_state(
         self,

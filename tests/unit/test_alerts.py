@@ -32,6 +32,7 @@ class RecordingRepo:
 def _trade() -> Trade:
     return Trade(
         id=9,
+        symbol="BTC",
         direction=Direction.LONG,
         size_usdt=2000.0,
         leverage=5,

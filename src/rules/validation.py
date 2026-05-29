@@ -5,6 +5,19 @@ from __future__ import annotations
 from src.models.trade import Direction, Regime
 
 
+def validate_symbol(value: object, universe: set[str]) -> str:
+    """Validate a Hyperliquid perpetual symbol against the cached universe."""
+
+    if not isinstance(value, str) or not value.strip():
+        msg = "symbol must be a Hyperliquid perpetual symbol. Example: BTC."
+        raise ValueError(msg)
+    normalized = value.strip().upper()
+    if normalized not in universe:
+        msg = "symbol must be a Hyperliquid perpetual symbol. Example: BTC."
+        raise ValueError(msg)
+    return normalized
+
+
 def validate_direction(value: object) -> Direction:
     """Validate the trade direction field."""
 

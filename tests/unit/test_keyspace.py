@@ -28,6 +28,7 @@ def test_keyspace_builders_match_contract() -> None:
     assert keyspace.conversation_key(42) == "conversation:42"
     assert keyspace.signal_key(9) == "signals:9"
     assert keyspace.signals_active_key() == "signals:active"
+    assert keyspace.hyperliquid_universe_key() == "hyperliquid:universe:perps"
     assert keyspace.schema_version_key() == "schema:version"
 
 

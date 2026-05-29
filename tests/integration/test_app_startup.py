@@ -195,6 +195,7 @@ async def test_create_runtime_applies_migrations_and_starts_components(
                 trade_id=1,
                 snapshot=Trade(
                     id=1,
+                    symbol="BTC",
                     direction=Direction.LONG,
                     size_usdt=1000.0,
                     leverage=5,
@@ -218,7 +219,7 @@ async def test_create_runtime_applies_migrations_and_starts_components(
 
     health_update = FakeUpdate(1)
     await runtime.handlers.health(health_update, FakeContext())
-    assert "Websocket:" in health_update.effective_message.replies[-1]
+    assert "websocket:" in health_update.effective_message.replies[-1]
     assert "Redis connected: True" in health_update.effective_message.replies[-1]
 
     await runtime.start()
@@ -237,6 +238,7 @@ async def test_runtime_resume_state_rearms_unresolved_breaches() -> None:
 
     trade = Trade(
         id=7,
+        symbol="BTC",
         direction=Direction.LONG,
         size_usdt=1000.0,
         leverage=5,

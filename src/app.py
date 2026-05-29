@@ -25,7 +25,7 @@ from src.bot.handlers import TelegramHandlers
 from src.config import Settings, load_settings
 from src.db.repo import RedisRepository
 from src.events.bus import EventBus
-from src.exchange import BinanceExchangeAdapter, BybitExchangeAdapter, ExchangeAdapter
+from src.exchange import ExchangeAdapter, HyperliquidExchangeAdapter
 from src.monitor.alerts import AlertDispatcher
 from src.monitor.health import MonitorHealth
 from src.monitor.monitor import Monitor
@@ -82,6 +82,10 @@ class AppRuntime:
             asyncio.create_task(self.alerts.run(), name="alerts"),
             asyncio.create_task(self.health.run(), name="health"),
             asyncio.create_task(self.monitor.run(), name="monitor"),
+            asyncio.create_task(
+                self._run_universe_refresh_loop(),
+                name="universe-refresh",
+            ),
         ]
 
     async def wait(self) -> None:
@@ -115,6 +119,27 @@ class AppRuntime:
         await self._stop_application()
         if self.redis_client is not None:
             await self.redis_client.aclose()
+
+    async def _run_universe_refresh_loop(self) -> None:
+        fetch_universe = getattr(self.exchange_adapter, "fetch_universe", None)
+        if fetch_universe is None:
+            return
+
+        while True:
+            try:
+                symbols = await fetch_universe()
+                fetched_at = datetime.now(tz=UTC)
+                await self.repo.set_universe(symbols, fetched_at)
+                LOGGER.info(
+                    "universe_refreshed",
+                    symbol_count=len(symbols),
+                    fetched_at=fetched_at.isoformat(),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOGGER.warning("universe_refresh_failed", error=str(exc))
+            await asyncio.sleep(self.settings.hyperliquid_universe_refresh_seconds)
 
     async def _start_application(self) -> None:
         if self.application is None:
@@ -241,6 +266,7 @@ def build_runtime(
     forms = TradeFormService(
         repo=repo,
         settings=settings,
+        universe_fetcher=exchange,  # type: ignore[arg-type]
         now_fn=reference_now,
     )
     edit_closed = ClosedTradeEditService(
@@ -301,11 +327,9 @@ def build_sender(application: TelegramApplication, chat_id: int) -> TelegramSend
 
 
 def build_exchange_adapter(settings: Settings) -> ExchangeAdapter:
-    """Construct the configured exchange adapter."""
+    """Construct the Hyperliquid exchange adapter."""
 
-    if settings.exchange == "binance":
-        return BinanceExchangeAdapter(symbol=settings.symbol)
-    return BybitExchangeAdapter()
+    return HyperliquidExchangeAdapter(settings)
 
 
 def wire_handlers(application: Any, handlers: TelegramHandlers) -> None:

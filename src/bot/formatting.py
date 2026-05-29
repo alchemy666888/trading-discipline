@@ -14,6 +14,21 @@ def prompt_direction() -> str:
     return "Direction? (long/short)"
 
 
+def prompt_symbol() -> str:
+    return "Symbol? (e.g. BTC, ETH, HYPE, AUDUSD)"
+
+
+def symbol_unknown(value: str) -> str:
+    return (
+        f"Unknown symbol '{value}'. Use a Hyperliquid perpetual symbol - "
+        "try /open for examples, or /help symbol."
+    )
+
+
+def symbol_universe_unavailable() -> str:
+    return "Hyperliquid market list unavailable. Try again in a few seconds."
+
+
 def prompt_size_usdt() -> str:
     return "Size in USDT notional?"
 
@@ -82,7 +97,7 @@ def size_cap_exceeded(active_cap: float) -> str:
 
 def trade_committed(trade: Trade, *, warn_multiple_open: bool) -> str:
     lines = [
-        f"Trade #{trade.id} committed and monitored.",
+        f"{_trade_label(trade)} committed and monitored.",
         (
             "Invalidation: "
             f"{_format_price(trade.invalidation_price)}. Max loss: "
@@ -113,7 +128,7 @@ def open_trades(
             suffixes.append("active breach")
         status_suffix = f" [{', '.join(suffixes)}]" if suffixes else ""
         lines.append(
-            f"#{trade.id} {trade.direction.value} "
+            f"#{trade.id} {trade.symbol} {trade.direction.value} "
             f"{_format_amount(trade.size_usdt)} USDT @ "
             f"{_format_price(trade.entry_price)} invalidation "
             f"{_format_price(trade.invalidation_price)}{status_suffix}"
@@ -137,15 +152,15 @@ def close_confirmation(trade: Trade, streak: int) -> str:
     close_price = trade.close_price if trade.close_price is not None else 0.0
     realized_pnl = trade.realized_pnl if trade.realized_pnl is not None else 0.0
     return (
-        f"Trade #{trade.id} closed at {_format_price(close_price)}. "
+        f"{_trade_label(trade)} closed at {_format_price(close_price)}. "
         f"Realized P&L: {_format_signed_amount(realized_pnl)} USDT. "
         f"Streak: {streak}."
     )
 
 
-def justification_recorded(trade_id: int) -> str:
+def justification_recorded(trade: Trade) -> str:
     return (
-        f"Trade #{trade_id} marked OPEN_OVERRIDE. Justification recorded. "
+        f"{_trade_label(trade)} marked OPEN_OVERRIDE. Justification recorded. "
         "Monitoring resumed."
     )
 
@@ -157,6 +172,23 @@ def streak_status(streak: int, active_cap: float | None) -> str:
         f"Current losing streak: {streak}. "
         f"Active size cap: {_format_amount(active_cap)} USDT."
     )
+
+
+def no_symbol_streaks() -> str:
+    return "No closed trades yet on any symbol."
+
+
+def streaks_by_symbol(rows: list[tuple[str, int, float | None]]) -> str:
+    lines: list[str] = []
+    for symbol, streak, active_cap in rows:
+        if active_cap is None:
+            lines.append(f"{symbol}: streak {streak}, no cap")
+        else:
+            lines.append(
+                f"{symbol}: streak {streak}, "
+                f"size cap {_format_amount(active_cap)} USDT"
+            )
+    return "\n".join(lines)
 
 
 def stats_usage() -> str:
@@ -214,9 +246,9 @@ def setpnl_usage() -> str:
     return "Usage: /setpnl <trade_id> <pnl>"
 
 
-def setpnl_confirmation(trade_id: int, pnl: float, streak: int) -> str:
+def setpnl_confirmation(trade: Trade, pnl: float, streak: int) -> str:
     return (
-        f"Trade #{trade_id} P&L updated to {_format_signed_amount(pnl)} USDT. "
+        f"{_trade_label(trade)} P&L updated to {_format_signed_amount(pnl)} USDT. "
         f"Streak: {streak}."
     )
 
@@ -294,7 +326,7 @@ def edit_confirmation(trade: Trade, updated_fields: list[str]) -> str:
     fields = ", ".join(updated_fields)
     return "\n".join(
         [
-            f"Trade #{trade.id} updated: {fields}.",
+            f"{_trade_label(trade)} updated: {fields}.",
             (
                 f"{trade.direction.value} {_format_amount(trade.size_usdt)} USDT "
                 f"{trade.leverage}x @ {_format_price(trade.entry_price)}"
@@ -378,7 +410,7 @@ def edit_closed_applied(trade: Trade, changed_fields: list[str]) -> str:
     realized_pnl = trade.realized_pnl if trade.realized_pnl is not None else 0.0
     return "\n".join(
         [
-            f"Trade #{trade.id} updated: {fields}.",
+            f"{_trade_label(trade)} updated: {fields}.",
             (
                 f"{trade.direction.value} {_format_amount(trade.size_usdt)} USDT "
                 f"{trade.leverage}x @ {_format_price(trade.entry_price)}"
@@ -398,10 +430,14 @@ def edit_closed_cancelled() -> str:
 
 def health_status(payload: dict[str, object | None]) -> str:
     lines = [
-        f"Websocket: {payload['websocket_status']}",
-        f"Last tick age: {_format_optional_seconds(payload['last_tick_age_seconds'])}",
+        f"websocket: {payload['websocket_status']}",
+        f"last_frame_age_s: {_format_optional_seconds(payload['last_frame_age_s'])}",
+        (
+            "universe_cache_age_s: "
+            f"{_format_optional_seconds(payload['universe_cache_age_s'])}"
+        ),
+        f"last_hyperliquid_error: {payload['last_hyperliquid_error'] or 'none'}",
         f"Open trades: {payload['open_trade_count']}",
-        f"Last error: {payload['last_error'] or 'none'}",
         f"Redis connected: {payload['redis_connected']}",
         f"Redis AOF enabled: {payload['redis_appendonly_enabled']}",
         f"Redis persistence dir: {payload['redis_persistence_dir'] or 'unknown'}",
@@ -482,7 +518,7 @@ def breach_initial_alert(
     current_loss_usdt: float,
 ) -> str:
     return (
-        f"Alert: Trade #{trade.id} invalidation breached at "
+        f"Alert: {_trade_label(trade)} invalidation breached at "
         f"{_format_price(current_price)}. Elapsed: {elapsed_seconds}s. "
         f"Estimated loss: {_format_amount(current_loss_usdt)} USDT. "
         f"Reply /closed {trade.id} <price> or /justify {trade.id} <reason>."
@@ -496,7 +532,7 @@ def breach_escalation_alert(
     current_loss_usdt: float,
 ) -> str:
     return (
-        f"Alert: Trade #{trade.id} breach still unresolved at "
+        f"Alert: {_trade_label(trade)} breach still unresolved at "
         f"{_format_price(current_price)} after {elapsed_seconds}s. "
         f"Estimated loss: {_format_amount(current_loss_usdt)} USDT. "
         f"Reply /closed {trade.id} <price> or /justify {trade.id} <reason>."
@@ -534,6 +570,10 @@ def heartbeat_alert(last_tick_age_seconds: float | None, open_trade_count: int) 
 
 def _format_price(value: float) -> str:
     return _trimmed_number(value)
+
+
+def _trade_label(trade: Trade) -> str:
+    return f"Trade #{trade.id} ({trade.symbol} {trade.direction.value})"
 
 
 def _format_amount(value: float) -> str:

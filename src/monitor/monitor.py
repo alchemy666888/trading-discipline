@@ -84,11 +84,13 @@ class Monitor:
         await self._event_bus.publish(
             TickEvent(
                 ts=tick.ts,
-                payload=TickPayload(price=tick.price),
+                payload=TickPayload(symbol=tick.symbol, price=tick.price),
             )
         )
         open_trades = await self._repo.list_open_trades()
         for trade in open_trades:
+            if trade.symbol != tick.symbol:
+                continue
             self._alerts.update_trade_price(trade.id, tick.price)
             if not is_breach(trade.direction, trade.invalidation_price, tick.price):
                 continue

@@ -25,6 +25,7 @@ def test_trade_round_trip_json_serialization() -> None:
 
     trade = Trade(
         id=1,
+        symbol="BTC",
         direction=Direction.LONG,
         size_usdt=5000.0,
         leverage=10,
@@ -83,7 +84,7 @@ def test_record_models_round_trip_json_serialization() -> None:
         summary="FOMC begins in 15 minutes.",
     )
     event_adapter = TypeAdapter(Event)
-    event = TickEvent(ts=_now(), payload=TickPayload(price=82510.5))
+    event = TickEvent(ts=_now(), payload=TickPayload(symbol="BTC", price=82510.5))
 
     assert Breach.model_validate_json(breach.model_dump_json()) == breach
     assert Alert.model_validate_json(alert.model_dump_json()) == alert
@@ -103,6 +104,7 @@ def test_invalid_values_raise_validation_errors() -> None:
     with pytest.raises(ValidationError):
         Trade(
             id=1,
+            symbol="BTC",
             direction=Direction.SHORT,
             size_usdt=1000.0,
             leverage=5,

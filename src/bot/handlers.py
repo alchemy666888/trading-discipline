@@ -34,6 +34,7 @@ from src.monitor.alerts import AlertDispatcher
 from src.monitor.health import ApplicationHealthSnapshot, MonitorHealth
 from src.rules.context import RuleContext
 from src.rules.sizing import compute_size_cap
+from src.rules.sizing import consecutive_loss_count as count_consecutive_losses
 from src.rules.validation import validate_justification
 
 StatsProvider = Callable[[int], Awaitable[str]]
@@ -43,12 +44,26 @@ LOGGER = structlog.get_logger(__name__)
 
 def build_health_payload(
     snapshot: ApplicationHealthSnapshot,
+    *,
+    universe_fetched_at: datetime | None = None,
+    now: datetime | None = None,
 ) -> dict[str, object | None]:
     """Expose structured health fields for the `/health` formatter."""
+
+    reference_now = now or datetime.now(tz=UTC)
+    universe_cache_age = None
+    if universe_fetched_at is not None:
+        fetched_at = universe_fetched_at
+        if fetched_at.tzinfo is None:
+            fetched_at = fetched_at.replace(tzinfo=UTC)
+        universe_cache_age = max(0.0, (reference_now - fetched_at).total_seconds())
 
     return {
         "websocket_status": snapshot.websocket_status,
         "last_tick_age_seconds": snapshot.last_tick_age_seconds,
+        "last_frame_age_s": snapshot.last_tick_age_seconds,
+        "universe_cache_age_s": universe_cache_age,
+        "last_hyperliquid_error": snapshot.last_error,
         "open_trade_count": snapshot.open_trade_count,
         "last_error": snapshot.last_error,
         "redis_connected": snapshot.redis.connected,
@@ -253,7 +268,7 @@ class TelegramHandlers:
             breach,
             BreachResolution.JUSTIFIED,
         )
-        await _reply(update, formatting.justification_recorded(trade.id))
+        await _reply(update, formatting.justification_recorded(trade))
 
     @whitelisted
     @safe_handler
@@ -263,13 +278,33 @@ class TelegramHandlers:
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
         closed_trades = await self._repo.list_closed_trades()
-        streak = await self._repo.consecutive_loss_count()
-        active_cap = compute_size_cap(
-            RuleContext(trade_draft=TradeDraft(), recent_trades=closed_trades),
-            self._settings.consecutive_loss_threshold,
-            self._settings.size_reduction_factor,
-        )
-        await _reply(update, formatting.streak_status(streak, active_cap))
+        if not closed_trades:
+            await _reply(update, formatting.no_symbol_streaks())
+            return
+
+        grouped: dict[str, list[Trade]] = {}
+        for trade in closed_trades:
+            grouped.setdefault(trade.symbol, []).append(trade)
+
+        rows: list[tuple[str, int, float | None]] = []
+        for symbol in sorted(grouped):
+            symbol_trades = grouped[symbol]
+            active_cap = compute_size_cap(
+                RuleContext(
+                    trade_draft=TradeDraft(symbol=symbol),
+                    recent_trades=symbol_trades,
+                ),
+                self._settings.consecutive_loss_threshold,
+                self._settings.size_reduction_factor,
+            )
+            rows.append(
+                (
+                    symbol,
+                    count_consecutive_losses(symbol_trades),
+                    active_cap,
+                )
+            )
+        await _reply(update, formatting.streaks_by_symbol(rows))
 
     @whitelisted
     @safe_handler
@@ -301,7 +336,7 @@ class TelegramHandlers:
             await _reply(update, formatting.trade_not_found_or_closed(trade_id))
             return
         streak = await self._repo.consecutive_loss_count()
-        await _reply(update, formatting.setpnl_confirmation(trade.id, pnl, streak))
+        await _reply(update, formatting.setpnl_confirmation(trade, pnl, streak))
 
     @whitelisted
     @safe_handler
@@ -333,10 +368,8 @@ class TelegramHandlers:
             await _reply(update, formatting.edit_usage())
             return
 
-        # Call repository.update_trade() with the updates
-        # Validation and confirmation messages are handled in later tasks
         trade = await self._repo.update_trade(trade_id, updates)
-        await _reply(update, f"Trade #{trade.id} updated.")
+        await _reply(update, formatting.edit_confirmation(trade, list(updates.keys())))
 
     @whitelisted
     @safe_handler
@@ -364,7 +397,15 @@ class TelegramHandlers:
     ) -> None:
         redis_health = await self._repo.get_redis_health()
         snapshot = await self._health.build_snapshot(redis=redis_health)
-        payload = build_health_payload(snapshot)
+        universe = None
+        get_universe = getattr(self._repo, "get_universe", None)
+        if get_universe is not None:
+            universe = await get_universe()
+        payload = build_health_payload(
+            snapshot,
+            universe_fetched_at=universe[1] if universe is not None else None,
+            now=self._now(),
+        )
         await _reply(update, formatting.health_status(payload))
 
     @whitelisted

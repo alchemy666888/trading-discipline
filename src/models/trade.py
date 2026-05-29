@@ -44,6 +44,7 @@ class TradeDraft(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    symbol: str | None = Field(default=None, min_length=1)
     direction: Direction | None = None
     size_usdt: PositiveFloat | None = None
     leverage: int | None = Field(default=None, ge=1, le=125)
@@ -92,6 +93,7 @@ class Trade(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: PositiveInt
+    symbol: str = Field(min_length=1)
     direction: Direction
     size_usdt: PositiveFloat
     leverage: int = Field(ge=1, le=125)

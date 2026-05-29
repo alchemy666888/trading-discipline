@@ -19,6 +19,7 @@ async def test_close_and_breach_race_keeps_state_consistent(
 
     trade = await redis_repo.create_trade(
         TradeDraft(
+            symbol="BTC",
             direction=Direction.LONG,
             size_usdt=1000.0,
             leverage=5,

@@ -1,14 +1,13 @@
-# BTC Discipline Bot
+# Trading Discipline Bot
 
-BTC Discipline Bot is a single-user, self-hosted Telegram bot for pre-trade discipline on `BTCUSDT`. It is not a trading bot. It never places orders, connects to private exchange APIs, generates trade ideas, or runs AI behavior in v1. Its job is to force a complete pre-trade plan, monitor the user's invalidation level, escalate when invalidation is breached, and track adherence statistics.
+Trading Discipline Bot is a single-user, self-hosted Telegram bot for pre-trade discipline on Hyperliquid perpetuals. It is not a trading bot. It never places orders, connects to private exchange APIs, generates trade ideas, or runs AI behavior in v1. Its job is to force a complete pre-trade plan, monitor the user's invalidation level on the selected symbol, escalate when invalidation is breached, and track adherence statistics.
 
 ## v1 Scope
 
 - Telegram-only interface
 - Single whitelisted chat ID
 - Redis as the only authoritative datastore
-- Binance BTCUSDT perpetual websocket monitoring in v1
-- Bybit adapter reserved as a stub seam
+- Hyperliquid perpetual websocket monitoring via the public `allMids` feed
 - Deterministic sizing and leverage rules
 - Weekly summary and daily healthy heartbeat
 - Empty intelligence extension seam only
@@ -39,7 +38,7 @@ tests/
 - Docker + Docker Compose
 - Telegram bot token
 - One allowed Telegram chat ID
-- Network access from the bot container to Telegram, Redis, and Binance websocket endpoints
+- Network access from the bot container to Telegram, Redis, and `api.hyperliquid.xyz`
 
 ## Quick Start
 
@@ -68,7 +67,7 @@ docker compose up -d --build
 /health
 ```
 
-5. Open a commitment flow:
+5. Open a commitment flow. The first field is the Hyperliquid perpetual symbol:
 
 ```text
 /new
@@ -85,11 +84,15 @@ Required:
 
 Important defaults:
 
-- `EXCHANGE=binance`
-- `SYMBOL=BTCUSDT`
-- `LEVERAGE_BLOCK_THRESHOLD=20`
+- `LEVERAGE_BLOCK_THRESHOLD=10`
 - `CONSECUTIVE_LOSS_THRESHOLD=2`
 - `SIZE_REDUCTION_FACTOR=0.5`
+- `HYPERLIQUID_WS_URL=wss://api.hyperliquid.xyz/ws`
+- `HYPERLIQUID_INFO_URL=https://api.hyperliquid.xyz/info`
+- `HYPERLIQUID_UNIVERSE_REFRESH_SECONDS=300`
+- `HYPERLIQUID_UNIVERSE_STALE_SECONDS=900`
+- `HYPERLIQUID_FEED_STALE_SECONDS=30`
+- `HYPERLIQUID_FEED_REQUEST_TIMEOUT_SECONDS=5`
 - `FORM_TIMEOUT_SECONDS=600`
 - `TIMEZONE=UTC`
 - `REDIS_URL=redis://redis:6379/0`
@@ -110,15 +113,17 @@ Health and alert cadence:
 
 `HEARTBEAT_FILE_PATH` is optional. When set to `/heartbeat/monitor.txt` in Docker Compose, the bot updates that file so an external monitor can alert if the process dies silently.
 
+Supported markets are the live Hyperliquid perpetual universe returned by [https://api.hyperliquid.xyz/info](https://api.hyperliquid.xyz/info) with `{"type":"meta"}`. Symbols are stored per trade, for example `BTC`, `ETH`, `HYPE`, or `AUDUSD` when listed.
+
 ## Common Commands
 
-- `/new` starts the 8-field pre-trade form
+- `/new` starts the symbol-first pre-trade form
 - `/closed <price>` closes the most recent open trade
 - `/closed <id> <price>` closes a specific open trade
 - `/justify <trade_id> <reason>` resolves a breach and resumes monitoring
 - `/cancel` clears the in-progress form and returns to IDLE
 - `/open` lists current `OPEN` and `OPEN_OVERRIDE` trades
-- `/streak` shows the current loss streak and active size cap
+- `/streak` shows the loss streak and active size cap per symbol
 - `/stats [days]` shows rolling stats
 - `/setpnl <trade_id> <pnl>` overrides realized P&L for a closed trade
 - `/health` shows websocket and Redis health
@@ -165,9 +170,10 @@ Data survives `docker compose down` / `up -d` as long as the host-mounted Redis 
 `/health` reports:
 
 - websocket connection status
-- last tick age
+- last `allMids` frame age
+- Hyperliquid universe cache age
+- last Hyperliquid error
 - open trade count
-- last websocket error
 - Redis connectivity
 - Redis AOF and persistence status
 
@@ -187,7 +193,7 @@ The convention test in [tests/unit/test_intelligence_boundary.py](/Users/antee/D
 
 Before live use, run a paper-trade smoke test for 24 hours:
 
-1. Start the stack with Binance websocket access enabled.
+1. Start the stack with public market-data websocket access enabled.
 2. Open one low-stakes paper trade with `/new`.
 3. Watch `/health`, heartbeat delivery, and reconnect logs for a full day.
 4. Confirm no false breaches, sane stats output, and recovery messages after any network blips.

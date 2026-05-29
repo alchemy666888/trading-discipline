@@ -26,7 +26,7 @@ def discipline_impact(
     threshold: int = 2,
     factor: float = 0.5,
 ) -> DisciplineImpact:
-    """Compute the discipline impact of replacing one closed trade."""
+    """Compute the discipline impact over a caller-scoped closed-trade list."""
 
     before = list(closed_trades)
     after = [edited if trade.id == edited.id else trade for trade in closed_trades]

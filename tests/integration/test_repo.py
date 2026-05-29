@@ -23,6 +23,7 @@ async def test_repo_full_lifecycle_open_breach_override_breach_close(
     """REQ-001 / REQ-005 / REQ-010 / REQ-011: repo supports the full trade lifecycle."""
 
     draft = TradeDraft(
+        symbol="BTC",
         direction=Direction.LONG,
         size_usdt=5000.0,
         leverage=20,
@@ -121,6 +122,7 @@ async def test_repo_stores_user_text_only_as_hash_values(
     suspicious_text = "seq:trade_id trade:99 breach:1\n{inject}"
     trade = await redis_repo.create_trade(
         TradeDraft(
+            symbol="BTC",
             direction=Direction.SHORT,
             size_usdt=1200.0,
             leverage=5,
@@ -173,6 +175,7 @@ async def test_repo_resolve_breach_without_trade_transition(
 
     trade = await redis_repo.create_trade(
         TradeDraft(
+            symbol="BTC",
             direction=Direction.LONG,
             size_usdt=2500.0,
             leverage=3,
@@ -212,6 +215,7 @@ async def test_repo_consecutive_loss_count_ignores_breakeven(
 
     losing_trade_1 = await redis_repo.create_trade(
         TradeDraft(
+            symbol="BTC",
             direction=Direction.LONG,
             size_usdt=1000.0,
             leverage=2,
@@ -231,6 +235,7 @@ async def test_repo_consecutive_loss_count_ignores_breakeven(
 
     breakeven_trade = await redis_repo.create_trade(
         TradeDraft(
+            symbol="BTC",
             direction=Direction.LONG,
             size_usdt=1000.0,
             leverage=2,
@@ -250,6 +255,7 @@ async def test_repo_consecutive_loss_count_ignores_breakeven(
 
     losing_trade_2 = await redis_repo.create_trade(
         TradeDraft(
+            symbol="BTC",
             direction=Direction.LONG,
             size_usdt=1000.0,
             leverage=2,
@@ -292,6 +298,7 @@ async def test_update_trade_closed_returns_error(
     # Create and close a trade
     trade = await redis_repo.create_trade(
         TradeDraft(
+            symbol="BTC",
             direction=Direction.LONG,
             size_usdt=1000.0,
             leverage=5,
@@ -324,6 +331,7 @@ async def test_update_trade_only_editable_fields_modified(
     # Create a trade
     trade = await redis_repo.create_trade(
         TradeDraft(
+            symbol="BTC",
             direction=Direction.LONG,
             size_usdt=1000.0,
             leverage=5,
@@ -368,6 +376,7 @@ async def test_update_trade_non_editable_fields_preserved(
     # Create a trade
     trade = await redis_repo.create_trade(
         TradeDraft(
+            symbol="BTC",
             direction=Direction.LONG,
             size_usdt=1000.0,
             leverage=5,
@@ -416,6 +425,7 @@ async def test_update_trade_leverage_reduction_clears_override_reason(
     # Create a trade with high leverage and override reason
     trade = await redis_repo.create_trade(
         TradeDraft(
+            symbol="BTC",
             direction=Direction.LONG,
             size_usdt=1000.0,
             leverage=25,
@@ -453,6 +463,7 @@ async def test_update_trade_leverage_unchanged_preserves_override_reason(
     # Create a trade with high leverage and override reason
     trade = await redis_repo.create_trade(
         TradeDraft(
+            symbol="BTC",
             direction=Direction.LONG,
             size_usdt=1000.0,
             leverage=30,
@@ -491,6 +502,7 @@ async def test_update_trade_high_leverage_without_override_reason_fails(
     # Create a trade with low leverage
     trade = await redis_repo.create_trade(
         TradeDraft(
+            symbol="BTC",
             direction=Direction.LONG,
             size_usdt=1000.0,
             leverage=10,
@@ -523,6 +535,7 @@ async def test_update_trade_high_leverage_with_override_reason_succeeds(
     # Create a trade with low leverage
     trade = await redis_repo.create_trade(
         TradeDraft(
+            symbol="BTC",
             direction=Direction.LONG,
             size_usdt=1000.0,
             leverage=10,
@@ -555,6 +568,7 @@ async def test_update_closed_trade_only_named_fields_change(
 
     trade = await redis_repo.create_trade(
         TradeDraft(
+            symbol="BTC",
             direction=Direction.LONG,
             size_usdt=1000.0,
             leverage=5,
@@ -602,6 +616,7 @@ async def test_update_closed_trade_recomputed_pnl_is_written(
 
     trade = await redis_repo.create_trade(
         TradeDraft(
+            symbol="BTC",
             direction=Direction.LONG,
             size_usdt=1000.0,
             leverage=5,
@@ -637,6 +652,7 @@ async def test_update_closed_trade_open_trade_returns_none(
 
     trade = await redis_repo.create_trade(
         TradeDraft(
+            symbol="BTC",
             direction=Direction.LONG,
             size_usdt=1000.0,
             leverage=5,
@@ -721,6 +737,7 @@ async def _closed_repo_trade(
 ) -> Trade:
     trade = await redis_repo.create_trade(
         TradeDraft(
+            symbol="BTC",
             direction=Direction.LONG,
             size_usdt=1000.0 + trade_id_offset,
             leverage=5,

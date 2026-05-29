@@ -238,7 +238,9 @@ class MonitorHealth:
         )
 
     async def _handle_down_event(self, event: ConnectionEvent) -> None:
-        self._websocket_status = "down"
+        self._websocket_status = (
+            "stale" if event.state == ConnectionState.STALE else "disconnected"
+        )
         self._last_error = event.reason
 
         immediate_alert = self._flapping_alert_next_disconnect

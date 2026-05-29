@@ -88,6 +88,10 @@ class InMemoryE2ERepo:
         self.trades: dict[int, Trade] = {}
         self.breaches: dict[int, Breach] = {}
         self.active_breaches: dict[int, int] = {}
+        self.universe: tuple[set[str], datetime] | None = (
+            {"BTC", "ETH", "HYPE", "AUDUSD"},
+            datetime(2026, 5, 17, 9, 0, tzinfo=UTC),
+        )
         self._next_trade_id = 1
         self._next_breach_id = 1
 
@@ -116,6 +120,7 @@ class InMemoryE2ERepo:
     ) -> Trade:
         trade = Trade(
             id=self._next_trade_id,
+            symbol=draft.symbol,
             direction=draft.direction,
             size_usdt=draft.size_usdt,
             leverage=draft.leverage,
@@ -148,11 +153,16 @@ class InMemoryE2ERepo:
         ]
         return sorted(trades, key=lambda trade: trade.opened_at)
 
-    async def list_closed_trades(self, limit: int | None = None) -> list[Trade]:
+    async def list_closed_trades(
+        self,
+        limit: int | None = None,
+        symbol: str | None = None,
+    ) -> list[Trade]:
         trades = [
             trade
             for trade in self.trades.values()
             if trade.status == TradeStatus.CLOSED
+            and (symbol is None or trade.symbol == symbol)
         ]
         trades.sort(key=lambda trade: trade.closed_at or trade.opened_at, reverse=True)
         return trades if limit is None else trades[:limit]
@@ -272,9 +282,9 @@ class InMemoryE2ERepo:
     async def recent_closed_trades(self, n: int) -> list[Trade]:
         return (await self.list_closed_trades())[:n]
 
-    async def consecutive_loss_count(self) -> int:
+    async def consecutive_loss_count(self, symbol: str | None = None) -> int:
         streak = 0
-        for trade in await self.list_closed_trades():
+        for trade in await self.list_closed_trades(symbol=symbol):
             if trade.realized_pnl is None:
                 continue
             if trade.realized_pnl < 0:
@@ -316,6 +326,12 @@ class InMemoryE2ERepo:
             aof_last_write_status="ok",
             last_error=None,
         )
+
+    async def get_universe(self) -> tuple[set[str], datetime] | None:
+        return self.universe
+
+    async def set_universe(self, symbols: list[str], fetched_at: datetime) -> None:
+        self.universe = (set(symbols), fetched_at)
 
 
 def _settings() -> Settings:
@@ -361,6 +377,7 @@ async def _open_trade(runtime: object) -> Trade:
     start_update = FakeUpdate(1)
     await handlers.new(start_update, FakeContext())
     for text in [
+        "BTC",
         "long",
         "1000",
         "10",
@@ -385,7 +402,7 @@ async def test_happy_path_open_favorable_close_profit() -> None:
     trade = await _open_trade(runtime)
 
     await runtime.monitor.process_tick(
-        Tick(price=83000.0, ts=datetime(2026, 5, 17, 9, 1, tzinfo=UTC))
+        Tick("BTC", 83000.0, datetime(2026, 5, 17, 9, 1, tzinfo=UTC))
     )
     assert sent_messages == []
 
@@ -408,7 +425,7 @@ async def test_breach_then_closed_flow() -> None:
     trade = await _open_trade(runtime)
 
     await runtime.monitor.process_tick(
-        Tick(price=81190.0, ts=datetime(2026, 5, 17, 9, 1, tzinfo=UTC))
+        Tick("BTC", 81190.0, datetime(2026, 5, 17, 9, 1, tzinfo=UTC))
     )
     assert sent_messages and "Trade #1" in sent_messages[0]
 
@@ -419,7 +436,7 @@ async def test_breach_then_closed_flow() -> None:
     )
 
     assert repo.active_breaches == {}
-    assert "Trade #1 closed" in close_update.effective_message.replies[-1]
+    assert "Trade #1 (BTC long) closed" in close_update.effective_message.replies[-1]
 
 
 @pytest.mark.asyncio
@@ -432,7 +449,7 @@ async def test_breach_then_justify_then_second_breach_rearms() -> None:
     trade = await _open_trade(runtime)
 
     await runtime.monitor.process_tick(
-        Tick(price=81190.0, ts=datetime(2026, 5, 17, 9, 1, tzinfo=UTC))
+        Tick("BTC", 81190.0, datetime(2026, 5, 17, 9, 1, tzinfo=UTC))
     )
     justify_update = FakeUpdate(1)
     await runtime.handlers.justify(
@@ -442,10 +459,10 @@ async def test_breach_then_justify_then_second_breach_rearms() -> None:
     assert repo.active_breaches == {}
 
     await runtime.monitor.process_tick(
-        Tick(price=81300.0, ts=datetime(2026, 5, 17, 9, 2, tzinfo=UTC))
+        Tick("BTC", 81300.0, datetime(2026, 5, 17, 9, 2, tzinfo=UTC))
     )
     await runtime.monitor.process_tick(
-        Tick(price=81180.0, ts=datetime(2026, 5, 17, 9, 3, tzinfo=UTC))
+        Tick("BTC", 81180.0, datetime(2026, 5, 17, 9, 3, tzinfo=UTC))
     )
 
     assert len(sent_messages) >= 2
@@ -462,7 +479,7 @@ async def test_breach_no_response_escalates() -> None:
     await _open_trade(runtime)
 
     await runtime.monitor.process_tick(
-        Tick(price=81190.0, ts=datetime(2026, 5, 17, 9, 1, tzinfo=UTC))
+        Tick("BTC", 81190.0, datetime(2026, 5, 17, 9, 1, tzinfo=UTC))
     )
     initial_count = len(sent_messages)
 
@@ -484,7 +501,7 @@ async def test_disconnect_during_breach_reconnect_alerts_continue() -> None:
     await _open_trade(runtime)
 
     await runtime.monitor.process_tick(
-        Tick(price=81190.0, ts=datetime(2026, 5, 17, 9, 1, tzinfo=UTC))
+        Tick("BTC", 81190.0, datetime(2026, 5, 17, 9, 1, tzinfo=UTC))
     )
     await runtime.health.handle_connection_event(
         ConnectionEvent(
@@ -619,6 +636,7 @@ async def test_gap_over_60s_reconnect_rechecks_and_breaches() -> None:
     repo = InMemoryE2ERepo()
     trade = await repo.create_trade(
         TradeDraft(
+            symbol="BTC",
             direction=Direction.SHORT,
             size_usdt=1000.0,
             leverage=5,
@@ -645,7 +663,7 @@ async def test_gap_over_60s_reconnect_rechecks_and_breaches() -> None:
                 gap_seconds=70,
                 reason=None,
             ),
-            Tick(price=83010.0, ts=clock.now() + timedelta(seconds=70)),
+            Tick("BTC", 83010.0, clock.now() + timedelta(seconds=70)),
         ]
     )
     runtime, sent_messages = _build_runtime(clock=clock, repo=repo, adapter=adapter)
@@ -700,6 +718,7 @@ async def test_restart_with_open_trade_and_unresolved_breach_rearms_alerts() -> 
     repo = InMemoryE2ERepo()
     trade = await repo.create_trade(
         TradeDraft(
+            symbol="BTC",
             direction=Direction.LONG,
             size_usdt=1000.0,
             leverage=5,

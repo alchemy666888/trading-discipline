@@ -92,6 +92,10 @@ class InMemoryHandlerRepo:
         self.trades: dict[int, Trade] = {}
         self.breaches: dict[int, Breach] = {}
         self.active_breaches: dict[int, int] = {}
+        self.universe: tuple[set[str], datetime] | None = (
+            {"BTC", "ETH", "HYPE", "AUDUSD"},
+            datetime(2026, 5, 17, 9, 0, tzinfo=UTC),
+        )
         self._next_trade_id = 1
         self._next_breach_id = 1
 
@@ -110,6 +114,12 @@ class InMemoryHandlerRepo:
     async def clear_conversation_state(self, chat_id: int) -> None:
         self.conversations.pop(chat_id, None)
 
+    async def get_universe(self) -> tuple[set[str], datetime] | None:
+        return self.universe
+
+    async def set_universe(self, symbols: list[str], fetched_at: datetime) -> None:
+        self.universe = (set(symbols), fetched_at)
+
     async def create_trade(
         self,
         draft: TradeDraft,
@@ -120,6 +130,7 @@ class InMemoryHandlerRepo:
     ) -> Trade:
         trade = Trade(
             id=self._next_trade_id,
+            symbol=draft.symbol,
             direction=draft.direction,
             size_usdt=draft.size_usdt,
             leverage=draft.leverage,
@@ -218,11 +229,16 @@ class InMemoryHandlerRepo:
             return None
         return self.breaches.get(breach_id)
 
-    async def list_closed_trades(self, limit: int | None = None) -> list[Trade]:
+    async def list_closed_trades(
+        self,
+        limit: int | None = None,
+        symbol: str | None = None,
+    ) -> list[Trade]:
         trades = [
             trade
             for trade in self.trades.values()
             if trade.status == TradeStatus.CLOSED
+            and (symbol is None or trade.symbol == symbol)
         ]
         trades.sort(key=lambda trade: trade.closed_at or trade.opened_at, reverse=True)
         if limit is None:
@@ -328,6 +344,7 @@ def _draft(
 ) -> TradeDraft:
     entry_price = 82000.0 if direction == Direction.LONG else 82000.0
     return TradeDraft(
+        symbol="BTC",
         direction=direction,
         size_usdt=size_usdt,
         leverage=leverage,
@@ -377,7 +394,9 @@ async def test_handlers_new_text_cancel_and_trade_opened_event() -> None:
 
     update = FakeUpdate(1)
     await handlers.new(update, FakeContext())
-    assert update.effective_message.replies[-1] == "Direction? (long/short)"
+    assert update.effective_message.replies[-1] == (
+        "Symbol? (e.g. BTC, ETH, HYPE, AUDUSD)"
+    )
 
     await handlers.new(update, FakeContext())
     assert (
@@ -386,6 +405,7 @@ async def test_handlers_new_text_cancel_and_trade_opened_event() -> None:
     )
 
     for text in [
+        "BTC",
         "long",
         "5000",
         "10",
@@ -447,7 +467,10 @@ async def test_handlers_closed_and_justify_publish_events() -> None:
     closed_update = FakeUpdate(1)
     await handlers.closed(closed_update, FakeContext(args=["81050"]))
 
-    assert "Trade #1 closed at 81050." in closed_update.effective_message.replies[-1]
+    assert (
+        "Trade #1 (BTC long) closed at 81050."
+        in closed_update.effective_message.replies[-1]
+    )
     assert alerts.resolved_breach_ids == [breach.id]
     assert received == [EventType.BREACH_RESOLVED, EventType.TRADE_CLOSED]
 
@@ -467,7 +490,7 @@ async def test_handlers_closed_and_justify_publish_events() -> None:
     )
 
     assert justify_update.effective_message.replies[-1].startswith(
-        "Trade #2 marked OPEN_OVERRIDE."
+        "Trade #2 (BTC short) marked OPEN_OVERRIDE."
     )
     assert repo.trades[trade_two.id].status == TradeStatus.OPEN_OVERRIDE
 
@@ -527,9 +550,7 @@ async def test_handlers_open_streak_stats_and_setpnl_commands() -> None:
 
     streak_update = FakeUpdate(1)
     await handlers.streak(streak_update, FakeContext())
-    assert streak_update.effective_message.replies[-1].startswith(
-        "Current losing streak:"
-    )
+    assert streak_update.effective_message.replies[-1].startswith("BTC: streak")
 
     stats_update = FakeUpdate(1)
     await handlers.stats(stats_update, FakeContext(args=["14"]))
@@ -545,7 +566,7 @@ async def test_handlers_open_streak_stats_and_setpnl_commands() -> None:
         FakeContext(args=[str(losing_trade.id), "-42.5"]),
     )
     assert (
-        "Trade #2 P&L updated to -42.5 USDT."
+        "Trade #2 (BTC long) P&L updated to -42.5 USDT."
         in setpnl_update.effective_message.replies[-1]
     )
 
@@ -596,7 +617,8 @@ async def test_handlers_edit_closed_happy_path_previews_and_applies() -> None:
     assert repo.trades[target.id].realized_pnl is not None
     assert repo.trades[target.id].realized_pnl > 0
     assert (
-        "Trade #1 updated: close_price." in confirm_update.effective_message.replies[-1]
+        "Trade #1 (BTC long) updated: close_price."
+        in confirm_update.effective_message.replies[-1]
     )
     assert repo.conversations == {}
 
@@ -676,7 +698,7 @@ async def test_handlers_health_signals_help_unknown_and_empty_open() -> None:
 
     health_update = FakeUpdate(1)
     await handlers.health(health_update, FakeContext())
-    assert "Websocket: connected" in health_update.effective_message.replies[-1]
+    assert "websocket: connected" in health_update.effective_message.replies[-1]
     assert "Redis AOF enabled: True" in health_update.effective_message.replies[-1]
 
     signals_update = FakeUpdate(1)

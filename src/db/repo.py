@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import inspect
+import json
 from collections.abc import Awaitable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
+import structlog
 from redis import WatchError
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
@@ -24,11 +26,13 @@ from src.rules import validation as validate
 T = TypeVar("T")
 
 _SCRIPT_DIR = Path(__file__).resolve().parent / "scripts"
+LOGGER = structlog.get_logger(__name__)
 
 # Fields that cannot be edited after trade creation
 NON_EDITABLE_FIELDS: frozenset[str] = frozenset(
     {
         "id",
+        "symbol",
         "opened_at",
         "closed_at",
         "close_price",
@@ -601,22 +605,31 @@ class RedisRepository:
                 trades.append(trade)
         return trades
 
-    async def list_closed_trades(self, limit: int | None = None) -> list[Trade]:
-        """Return closed trades, newest first, with an optional result cap."""
+    async def list_closed_trades(
+        self,
+        limit: int | None = None,
+        symbol: str | None = None,
+    ) -> list[Trade]:
+        """Return closed trades newest first, optionally scoped to one symbol."""
 
-        end_index = -1 if limit is None else limit - 1
+        end_index = -1 if limit is None or symbol is not None else limit - 1
         raw_ids = await self._resolve_redis_call(
             self._client.zrevrange(keyspace.trades_closed_key(), 0, end_index)
         )
         trades: list[Trade] = []
         for raw_id in raw_ids:
             trade = await self.get_trade(self._require_positive_int_from_redis(raw_id))
-            if trade is not None:
-                trades.append(trade)
+            if trade is None:
+                continue
+            if symbol is not None and trade.symbol != symbol:
+                continue
+            trades.append(trade)
+            if symbol is not None and limit is not None and len(trades) >= limit:
+                break
         return trades
 
-    async def consecutive_loss_count(self) -> int:
-        """Count consecutive losing closed trades, ignoring breakevens."""
+    async def consecutive_loss_count(self, symbol: str | None = None) -> int:
+        """Count consecutive losing closed trades, optionally scoped to a symbol."""
 
         raw_ids = await self._resolve_redis_call(
             self._client.zrevrange(keyspace.trades_closed_key(), 0, -1)
@@ -626,12 +639,61 @@ class RedisRepository:
             trade = await self.get_trade(self._require_positive_int_from_redis(raw_id))
             if trade is None or trade.realized_pnl is None:
                 continue
+            if symbol is not None and trade.symbol != symbol:
+                continue
             if trade.realized_pnl < 0:
                 streak += 1
                 continue
             if trade.realized_pnl > 0:
                 break
         return streak
+
+    async def get_universe(self) -> tuple[set[str], datetime] | None:
+        """Load the cached Hyperliquid perpetual universe if present and valid."""
+
+        raw_value = await self._resolve_redis_call(
+            self._client.get(keyspace.hyperliquid_universe_key())
+        )
+        text = self._as_text(raw_value)
+        if text is None:
+            return None
+
+        try:
+            payload = json.loads(text)
+            if not isinstance(payload, dict):
+                msg = "universe cache payload must be an object."
+                raise ValueError(msg)
+            raw_symbols = payload.get("symbols")
+            raw_fetched_at = payload.get("fetched_at")
+            if not isinstance(raw_symbols, list) or not isinstance(
+                raw_fetched_at,
+                str,
+            ):
+                msg = "universe cache requires symbols list and fetched_at string."
+                raise ValueError(msg)
+            fetched_at = datetime.fromisoformat(raw_fetched_at)
+            symbols = {
+                symbol for symbol in raw_symbols if isinstance(symbol, str) and symbol
+            }
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            LOGGER.warning("universe_cache_malformed", error=str(exc))
+            return None
+
+        return symbols, fetched_at
+
+    async def set_universe(self, symbols: list[str], fetched_at: datetime) -> None:
+        """Atomically store the cached Hyperliquid perpetual universe."""
+
+        payload = {
+            "symbols": symbols,
+            "fetched_at": self._serialize_datetime(fetched_at),
+        }
+        await self._resolve_redis_call(
+            self._client.set(
+                keyspace.hyperliquid_universe_key(),
+                json.dumps(payload, separators=(",", ":")),
+            )
+        )
 
     async def update_trade_realized_pnl(
         self,
@@ -1087,6 +1149,7 @@ class RedisRepository:
     ) -> Trade:
         return Trade(
             id=trade_id,
+            symbol=self._require(draft.symbol, "symbol"),
             direction=self._require(draft.direction, "direction"),
             size_usdt=self._require(draft.size_usdt, "size_usdt"),
             leverage=self._require(draft.leverage, "leverage"),
@@ -1220,6 +1283,7 @@ class RedisRepository:
     def _serialize_trade(self, trade: Trade) -> dict[str, str]:
         mapping: dict[str, str] = {
             "id": str(trade.id),
+            "symbol": trade.symbol,
             "direction": trade.direction.value,
             "size_usdt": self._serialize_float(trade.size_usdt),
             "leverage": str(trade.leverage),
@@ -1248,6 +1312,7 @@ class RedisRepository:
         data = self._normalize_hash(raw_mapping)
         payload: dict[str, Any] = {
             "id": int(data["id"]),
+            "symbol": data["symbol"],
             "direction": data["direction"],
             "size_usdt": float(data["size_usdt"]),
             "leverage": int(data["leverage"]),

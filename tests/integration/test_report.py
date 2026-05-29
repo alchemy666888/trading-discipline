@@ -29,6 +29,7 @@ class FakeReportRepo:
 def _trade(now: datetime) -> Trade:
     return Trade(
         id=1,
+        symbol="BTC",
         direction=Direction.LONG,
         size_usdt=1000.0,
         leverage=5,

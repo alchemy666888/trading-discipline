@@ -46,6 +46,7 @@ class EventPayload(BaseModel):
 class TickPayload(EventPayload):
     """Payload for price ticks."""
 
+    symbol: str
     price: PositiveFloat
 
 

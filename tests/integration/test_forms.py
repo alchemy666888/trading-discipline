@@ -29,6 +29,10 @@ class InMemoryFormRepo:
     def __init__(self) -> None:
         self.conversations: dict[int, ConversationState] = {}
         self.trades: dict[int, Trade] = {}
+        self.universe: tuple[set[str], datetime] | None = (
+            {"BTC", "ETH", "HYPE", "AUDUSD"},
+            datetime(2026, 5, 17, 9, 0, tzinfo=UTC),
+        )
         self._next_trade_id = 1
 
     async def get_conversation_state(self, chat_id: int) -> ConversationState | None:
@@ -46,11 +50,22 @@ class InMemoryFormRepo:
     async def clear_conversation_state(self, chat_id: int) -> None:
         self.conversations.pop(chat_id, None)
 
-    async def list_closed_trades(self, limit: int | None = None) -> list[Trade]:
+    async def get_universe(self) -> tuple[set[str], datetime] | None:
+        return self.universe
+
+    async def set_universe(self, symbols: list[str], fetched_at: datetime) -> None:
+        self.universe = (set(symbols), fetched_at)
+
+    async def list_closed_trades(
+        self,
+        limit: int | None = None,
+        symbol: str | None = None,
+    ) -> list[Trade]:
         trades = [
             trade
             for trade in self.trades.values()
             if trade.status == TradeStatus.CLOSED
+            and (symbol is None or trade.symbol == symbol)
         ]
         trades.sort(key=lambda trade: trade.closed_at or trade.opened_at, reverse=True)
         if limit is None:
@@ -67,6 +82,7 @@ class InMemoryFormRepo:
     ) -> Trade:
         trade = Trade(
             id=self._next_trade_id,
+            symbol=draft.symbol,
             direction=draft.direction,
             size_usdt=draft.size_usdt,
             leverage=draft.leverage,
@@ -124,6 +140,7 @@ def _closed_trade(
     close_price = 81000.0 if realized_pnl < 0 else 83000.0
     return Trade(
         id=trade_id,
+        symbol="BTC",
         direction=Direction.LONG,
         size_usdt=size_usdt,
         leverage=5,
@@ -151,9 +168,11 @@ async def test_form_happy_path_creates_trade_and_clears_state() -> None:
     service = TradeFormService(repo=repo, settings=_settings(), now_fn=clock.now)
 
     start = await service.start(1)
-    assert start.message == "Direction? (long/short)"
-    assert repo.conversations[1].state == ConversationStep.DIRECTION
+    assert start.message == "Symbol? (e.g. BTC, ETH, HYPE, AUDUSD)"
+    assert repo.conversations[1].state == ConversationStep.SYMBOL
 
+    await service.handle_input(1, "BTC")
+    assert repo.conversations[1].state == ConversationStep.DIRECTION
     await service.handle_input(1, "long")
     assert repo.conversations[1].state == ConversationStep.SIZE
     await service.handle_input(1, "5000")
@@ -184,6 +203,7 @@ async def test_form_high_leverage_override_reason_is_persisted() -> None:
     service = TradeFormService(repo=repo, settings=_settings(), now_fn=clock.now)
 
     await service.start(1)
+    await service.handle_input(1, "BTC")
     await service.handle_input(1, "short")
     await service.handle_input(1, "1000")
     result = await service.handle_input(1, "20")
@@ -217,6 +237,7 @@ async def test_form_cancel_during_override_returns_to_idle_without_trade() -> No
     service = TradeFormService(repo=repo, settings=_settings(), now_fn=clock.now)
 
     await service.start(1)
+    await service.handle_input(1, "BTC")
     await service.handle_input(1, "long")
     await service.handle_input(1, "900")
     await service.handle_input(1, "20")
@@ -237,7 +258,7 @@ async def test_form_timeout_drops_state_without_creating_trade() -> None:
 
     await service.start(1)
     clock.current += timedelta(seconds=601)
-    result = await service.handle_input(1, "long")
+    result = await service.handle_input(1, "BTC")
 
     assert result is not None
     assert "Form expired after 600 seconds" in result.message
@@ -269,6 +290,7 @@ async def test_form_rejects_size_above_active_cap() -> None:
     service = TradeFormService(repo=repo, settings=_settings(), now_fn=clock.now)
 
     await service.start(1)
+    await service.handle_input(1, "BTC")
     await service.handle_input(1, "long")
     result = await service.handle_input(1, "600")
 

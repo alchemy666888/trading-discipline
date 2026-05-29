@@ -108,7 +108,7 @@ class ClosedTradeEditService:
 
         changes = self._changed_editable_fields(current, preview)
         impact = discipline_impact(
-            await self._repo.list_closed_trades(),
+            await self._repo.list_closed_trades(symbol=current.symbol),
             preview,
             threshold=self._settings.consecutive_loss_threshold,
             factor=self._settings.size_reduction_factor,

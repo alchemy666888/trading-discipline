@@ -65,6 +65,7 @@ async def test_monitor_loop_creates_single_breach_and_publishes_events(
 
     trade = await redis_repo.create_trade(
         TradeDraft(
+            symbol="BTC",
             direction=Direction.LONG,
             size_usdt=2000.0,
             leverage=5,
@@ -116,9 +117,9 @@ async def test_monitor_loop_creates_single_breach_and_publishes_events(
     )
     adapter = FakeAdapter(
         [
-            Tick(price=81500.0, ts=datetime(2026, 5, 17, 9, 1, tzinfo=UTC)),
-            Tick(price=80990.0, ts=datetime(2026, 5, 17, 9, 2, tzinfo=UTC)),
-            Tick(price=80980.0, ts=datetime(2026, 5, 17, 9, 3, tzinfo=UTC)),
+            Tick("BTC", 81500.0, datetime(2026, 5, 17, 9, 1, tzinfo=UTC)),
+            Tick("BTC", 80990.0, datetime(2026, 5, 17, 9, 2, tzinfo=UTC)),
+            Tick("BTC", 80980.0, datetime(2026, 5, 17, 9, 3, tzinfo=UTC)),
         ]
     )
     monitor = Monitor(
@@ -150,6 +151,7 @@ async def test_monitor_gap_through_breach_on_first_post_reconnect_tick(
 
     trade = await redis_repo.create_trade(
         TradeDraft(
+            symbol="BTC",
             direction=Direction.SHORT,
             size_usdt=1500.0,
             leverage=4,
@@ -214,7 +216,7 @@ async def test_monitor_gap_through_breach_on_first_post_reconnect_tick(
                 gap_seconds=70,
                 reason=None,
             ),
-            Tick(price=83010.0, ts=start + timedelta(seconds=70)),
+            Tick("BTC", 83010.0, start + timedelta(seconds=70)),
         ]
     )
     monitor = Monitor(

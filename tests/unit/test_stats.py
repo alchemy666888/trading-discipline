@@ -25,6 +25,7 @@ def _closed_trade(
 ) -> Trade:
     return Trade(
         id=trade_id,
+        symbol="BTC",
         direction=direction,
         size_usdt=size_usdt,
         leverage=5,

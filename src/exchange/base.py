@@ -14,6 +14,7 @@ from enum import StrEnum
 class Tick:
     """Normalized market tick."""
 
+    symbol: str
     price: float
     ts: datetime
 
@@ -84,7 +85,7 @@ class ExchangeAdapter(ABC):
 
     @abstractmethod
     def stream_ticks(self) -> AsyncIterator[Tick]:
-        """Yield normalized ticks from the exchange feed."""
+        """Yield normalized ticks, possibly for many symbols from one feed."""
 
     @abstractmethod
     async def healthy(self) -> bool:

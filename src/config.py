@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import time
 from functools import lru_cache
+from typing import Any
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -12,7 +13,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Runtime configuration for the BTC Discipline Bot."""
+    """Runtime configuration for the trading discipline bot."""
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -24,11 +25,15 @@ class Settings(BaseSettings):
 
     telegram_bot_token: SecretStr
     telegram_chat_id: int
-    exchange: str = "binance"
-    symbol: str = "BTCUSDT"
-    leverage_block_threshold: int = 20
+    leverage_block_threshold: int = 10
     consecutive_loss_threshold: int = 2
     size_reduction_factor: float = 0.5
+    hyperliquid_ws_url: str = "wss://api.hyperliquid.xyz/ws"
+    hyperliquid_info_url: str = "https://api.hyperliquid.xyz/info"
+    hyperliquid_universe_refresh_seconds: int = 300
+    hyperliquid_universe_stale_seconds: int = 900
+    hyperliquid_feed_stale_seconds: int = 30
+    hyperliquid_feed_request_timeout_seconds: int = 5
     form_timeout_seconds: int = 600
     alert_interval_first_window_seconds: int = 60
     alert_interval_first_window_duration_seconds: int = 300
@@ -55,31 +60,13 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return value
 
-    @field_validator("exchange")
-    @classmethod
-    def validate_exchange(cls, value: str) -> str:
-        """Restrict the configured exchange to the v1 surface."""
-
-        normalized = value.strip().lower()
-        if normalized not in {"binance", "bybit"}:
-            msg = "EXCHANGE must be one of: binance, bybit."
-            raise ValueError(msg)
-        return normalized
-
-    @field_validator("symbol")
-    @classmethod
-    def validate_symbol(cls, value: str) -> str:
-        """Require a non-empty symbol."""
-
-        normalized = value.strip().upper()
-        if not normalized:
-            msg = "SYMBOL must not be empty."
-            raise ValueError(msg)
-        return normalized
-
     @field_validator(
         "leverage_block_threshold",
         "consecutive_loss_threshold",
+        "hyperliquid_universe_refresh_seconds",
+        "hyperliquid_universe_stale_seconds",
+        "hyperliquid_feed_stale_seconds",
+        "hyperliquid_feed_request_timeout_seconds",
         "form_timeout_seconds",
         "alert_interval_first_window_seconds",
         "alert_interval_first_window_duration_seconds",
@@ -148,7 +135,12 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return value
 
-    @field_validator("redis_data_dir", "compose_project_name")
+    @field_validator(
+        "hyperliquid_ws_url",
+        "hyperliquid_info_url",
+        "redis_data_dir",
+        "compose_project_name",
+    )
     @classmethod
     def validate_non_empty_strings(cls, value: str, info: ValidationInfo) -> str:
         """Ensure non-empty string settings."""
@@ -188,3 +180,16 @@ def load_settings() -> Settings:
     """Construct and cache application settings."""
 
     return Settings()
+
+
+class _SettingsProxy:
+    """Lazily expose configured settings for small command-line checks."""
+
+    def __getattr__(self, name: str) -> Any:
+        loaded = load_settings()
+        if name.isupper():
+            return getattr(loaded, name.lower())
+        return getattr(loaded, name)
+
+
+settings: _SettingsProxy = _SettingsProxy()

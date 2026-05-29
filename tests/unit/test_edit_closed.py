@@ -31,11 +31,16 @@ class InMemoryEditClosedRepo:
     async def get_trade(self, trade_id: int) -> Trade | None:
         return self.trades.get(trade_id)
 
-    async def list_closed_trades(self, limit: int | None = None) -> list[Trade]:
+    async def list_closed_trades(
+        self,
+        limit: int | None = None,
+        symbol: str | None = None,
+    ) -> list[Trade]:
         trades = [
             trade
             for trade in self.trades.values()
             if trade.status == TradeStatus.CLOSED
+            and (symbol is None or trade.symbol == symbol)
         ]
         trades.sort(key=lambda trade: trade.closed_at or trade.opened_at, reverse=True)
         if limit is None:
@@ -347,6 +352,7 @@ def _closed_trade(
     opened_at = datetime(2026, 5, 17, 12, 0, tzinfo=UTC)
     return Trade(
         id=1,
+        symbol="BTC",
         direction=direction,
         size_usdt=1000.0,
         leverage=leverage,

@@ -12,6 +12,7 @@ class ConversationStep(StrEnum):
     """Conversation states for conversational bot flows."""
 
     IDLE = "IDLE"
+    SYMBOL = "SYMBOL"
     DIRECTION = "DIRECTION"
     SIZE = "SIZE"
     LEVERAGE = "LEVERAGE"

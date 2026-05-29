@@ -1,4 +1,4 @@
-"""Redis key builders for the BTC Discipline Bot."""
+"""Redis key builders for the trading discipline bot."""
 
 from __future__ import annotations
 
@@ -100,6 +100,16 @@ def signal_key(signal_id: int) -> str:
 
 def signals_active_key() -> str:
     return "signals:active"
+
+
+def hyperliquid_universe_key() -> str:
+    """Return the Hyperliquid universe cache key.
+
+    This key lives outside the trade, breach, alert, conversation, and signals
+    namespaces, so it does not widen the REQ-010 intelligence write boundary.
+    """
+
+    return "hyperliquid:universe:perps"
 
 
 def schema_version_key() -> str:

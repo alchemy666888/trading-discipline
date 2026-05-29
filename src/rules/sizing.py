@@ -13,7 +13,11 @@ def compute_size_cap(
     threshold: int,
     factor: float,
 ) -> float | None:
-    """Compute the active size cap after a consecutive-loss streak."""
+    """Compute the active size cap after a consecutive-loss streak.
+
+    Callers pass only the candidate symbol's closed trades in
+    ``ctx.recent_trades``; the rule math stays symbol-agnostic.
+    """
 
     if threshold <= 0:
         msg = "threshold must be greater than 0."
@@ -46,7 +50,7 @@ def compute_size_cap(
 
 
 def consecutive_loss_count(trades: list[Trade]) -> int:
-    """Count consecutive losing closed trades from the most recent close."""
+    """Count consecutive losses in the already symbol-scoped trade list."""
 
     return _consecutive_loss_count(_sorted_closed_trades(trades))
 

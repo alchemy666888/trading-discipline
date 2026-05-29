@@ -13,6 +13,7 @@ from src.rules.sizing import compute_size_cap
 def _closed_trade(
     *,
     trade_id: int,
+    symbol: str = "BTC",
     size_usdt: float,
     realized_pnl: float,
     closed_offset_minutes: int,
@@ -25,6 +26,7 @@ def _closed_trade(
     )
     return Trade(
         id=trade_id,
+        symbol=symbol,
         direction=Direction.LONG,
         size_usdt=size_usdt,
         leverage=5,
@@ -60,6 +62,7 @@ def _ctx(trades: list[Trade], *, with_signals: bool = False) -> RuleContext:
         }
     return RuleContext(
         trade_draft=TradeDraft(
+            symbol="BTC",
             direction=Direction.LONG,
             size_usdt=2000.0,
             leverage=5,

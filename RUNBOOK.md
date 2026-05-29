@@ -20,10 +20,32 @@
 
 If you receive a monitor-down alert:
 
-1. Open `/health` and inspect websocket status and last tick age.
+1. Open `/health` and inspect `websocket`, `last_frame_age_s`, and `last_hyperliquid_error`.
 2. If open trades exist, prioritize whether you need to manage them manually on your exchange UI.
 3. Watch for the recovery message. A recovery alert includes the coverage gap in seconds.
 4. If the gap exceeded 60 seconds, treat the first post-reconnect evaluation as authoritative and review any new breach alerts immediately.
+
+Websocket status meanings:
+
+- `connected`: recent Hyperliquid `allMids` frame received.
+- `disconnected`: websocket disconnected and reconnect/backoff is active.
+- `stale`: no `allMids` frame arrived within `HYPERLIQUID_FEED_STALE_SECONDS`.
+- `unknown`: no connection event or tick has been observed since startup.
+
+## Hyperliquid Universe Cache Stale
+
+Symptoms:
+
+- `/new` rejects symbols with `Hyperliquid market list unavailable. Try again in a few seconds.`
+- logs contain `universe_refresh_failed`
+- `/health` shows `universe_cache_age_s: unknown` or a large age
+
+Actions:
+
+1. Confirm the bot container can reach `https://api.hyperliquid.xyz/info`.
+2. Wait for the next refresh interval (`HYPERLIQUID_UNIVERSE_REFRESH_SECONDS`) or restart the bot.
+3. If no cache exists and Hyperliquid info/meta is unreachable, do not commit new trades until the market list refreshes.
+4. Existing open trades continue to monitor from the websocket feed.
 
 ## Redis Unavailable
 
@@ -76,6 +98,29 @@ Behavior notes:
 - open trades are reloaded on startup
 - unresolved breaches are re-armed on startup
 - breach escalation restarts from level 0 after restart in v1
+
+## Clean Cutover Procedure
+
+This release is a clean break from the previous single-asset datastore.
+
+1. Stop the stack with `docker compose down`.
+2. Wipe the bot Redis database, for example by removing the mounted Redis data directory or running `redis-cli FLUSHDB` against the configured database.
+3. Remove old `SYMBOL` and `EXCHANGE` variables from `.env`.
+4. Add the `HYPERLIQUID_*` variables from `.env.example`; keep `LEVERAGE_BLOCK_THRESHOLD=10` unless intentionally overridden.
+5. Start with `docker compose up -d --build`.
+6. Verify `/health` shows a connected websocket and a fresh universe cache.
+7. Smoke test `/new` with `BTC`, cancel, then `/new` with another listed perp such as `ETH` or `AUDUSD` if listed.
+
+Rollback: stop the stack and deploy the previous image tag. There is no v1 trade data to recover after the clean cutover wipe.
+
+## Network Egress
+
+Allow outbound TLS access to:
+
+- Telegram Bot API
+- `api.hyperliquid.xyz` for websocket `allMids` and REST `info/meta`
+
+No private Hyperliquid endpoints, API keys, or signing are used.
 
 ## Restore from Redis Backup
 

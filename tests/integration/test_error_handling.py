@@ -55,7 +55,7 @@ class MinimalRepo:
     async def clear_conversation_state(self, chat_id: int) -> None:
         return None
 
-    async def list_closed_trades(self, limit=None):
+    async def list_closed_trades(self, limit=None, symbol=None):
         return []
 
     async def list_open_trades(self):
@@ -151,8 +151,8 @@ async def test_handler_exception_replies_with_internal_error_and_keeps_running()
 async def test_monitor_loop_logs_tick_failure_and_continues() -> None:
     """TASK-022: tick-processing failures are logged and later ticks continue."""
 
-    tick_one = Tick(price=82000.0, ts=datetime(2026, 5, 17, 9, 0, tzinfo=UTC))
-    tick_two = Tick(price=82100.0, ts=datetime(2026, 5, 17, 9, 1, tzinfo=UTC))
+    tick_one = Tick("BTC", 82000.0, datetime(2026, 5, 17, 9, 0, tzinfo=UTC))
+    tick_two = Tick("BTC", 82100.0, datetime(2026, 5, 17, 9, 1, tzinfo=UTC))
     monitor = Monitor(
         repo=MinimalMonitorRepo(),  # type: ignore[arg-type]
         adapter=FakeExchangeAdapter([tick_one, tick_two]),

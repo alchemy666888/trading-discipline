@@ -108,6 +108,7 @@ def test_discipline_impact_non_pnl_edit_leaves_state_unchanged() -> None:
 def _closed_trade(
     *,
     trade_id: int,
+    symbol: str = "BTC",
     size_usdt: float,
     realized_pnl: float,
     closed_offset_minutes: int,
@@ -120,6 +121,7 @@ def _closed_trade(
     )
     return Trade(
         id=trade_id,
+        symbol=symbol,
         direction=Direction.LONG,
         size_usdt=size_usdt,
         leverage=5,
